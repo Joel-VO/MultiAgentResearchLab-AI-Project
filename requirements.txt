@@ -1,0 +1,39 @@
+# Existing
+langgraph
+torch
+torchvision # Not really needed, if evaluation requires a VLM, we can use this.
+transformers
+unsloth # incase some finetuning or RL based tuning is to be done
+
+# Orchestration
+langgraph-checkpoint-sqlite
+pydantic
+
+# LLM clients
+ollama
+groq
+
+# Embeddings
+sentence-transformers
+
+# Literature APIs
+requests
+arxiv
+pymupdf
+openreview-py
+
+# KB, belief model, RL
+networkx
+numpy
+scipy
+
+# CSP
+python-constraint
+
+# Sandbox and datasets
+docker
+datasets
+
+# Config and tests
+python-dotenv
+pytest
