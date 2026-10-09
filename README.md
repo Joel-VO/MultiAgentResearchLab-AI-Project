@@ -46,6 +46,13 @@ Given a request such as *"Improve the factual reliability of question answering 
 Prerequisites: Python, [Ollama](https://ollama.com) running locally, and a [Groq](https://console.groq.com/docs/models) API key.
 
 ```bash
+python3.12 -m venv venv # use python3.12 as packages are more stable and support is guaranteed
+source venv/bin/activate
+pip install -r requirements.txt # Be in the appropriate directory
+```
+
+After full integration of the project, the following must be run
+```bash
 bash install.sh
 ```
 
