@@ -1,3 +1,5 @@
+from typing import Optional
+
 import ollama
 
 
@@ -12,7 +14,7 @@ class OllamaClient:
     def __init__(self, 
                 model:str = DEFAULT_MODEL,
                 host:str = DEFAULT_HOST,
-                timeout:str = DEFAULT_TIMEOUT,
+                timeout:int = DEFAULT_TIMEOUT,
                 think:bool = DEFAULT_THINK
                 ):
         self.model = model
@@ -21,7 +23,7 @@ class OllamaClient:
     
     def generate(self, 
                 user_prompt:str, # pass in the user prompt containing details of the hypothesis + paper details
-                system_prompt:str = None, # None is fine but make edits else it'll not work well
+                system_prompt:Optional[str] = None, # None is fine but make edits else it'll not work well
                 **options
                 ):
         """
@@ -38,7 +40,7 @@ class OllamaClient:
 
     def stream(self, 
                 user_prompt:str,
-                system_prompt:str = None,
+                system_prompt:Optional[str] = None,
                 **options
                 ):
         """
@@ -67,7 +69,7 @@ class OllamaClient:
 
 # if __name__  == "__main__": # for debugging purposes only.
 #     client = OllamaClient()
-#     print(client.stream("Why is the meaning of life 42?"))
-#     for chunk in client.stream("Why is the meaning of life 42?"):
-#         print(chunk, end="", flush=True)
-#     print()
+#     print(client.generate("Why is the meaning of life 42?"))
+    # for chunk in client.stream("Why is the meaning of life 42?"):
+    #     print(chunk, end="", flush=True)
+    # print()
