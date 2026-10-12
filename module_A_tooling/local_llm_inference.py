@@ -2,9 +2,9 @@ import ollama
 
 
 DEFAULT_HOST = "http://localhost:11434" # this is the standard host path, change as needed.
-DEFAULT_MODEL = "qwen3:7B" #  "default model"
+DEFAULT_MODEL = "qwen3:8b" #  "default model"
 DEFAULT_TIMEOUT = 120 # timeout in seconds
-DEFAULT_THINK = False
+DEFAULT_THINK = True
 class OllamaClient:
     """
     A client interface that connects the ollama server to the code.
@@ -15,7 +15,7 @@ class OllamaClient:
                 timeout:str = DEFAULT_TIMEOUT,
                 think:bool = DEFAULT_THINK
                 ):
-        self.model = model,
+        self.model = model
         self.think = think
         self.client = ollama.Client(host=host, timeout=timeout)
     
@@ -65,6 +65,9 @@ class OllamaClient:
         """
         return response["messages"]["content"] 
 
-if __name__  == "__main__": # for debugging purposes only.
-    client = OllamaClient()
-    print(client.generate("Why is the meaning of life 42?"))
+# if __name__  == "__main__": # for debugging purposes only.
+#     client = OllamaClient()
+#     print(client.stream("Why is the meaning of life 42?"))
+#     for chunk in client.stream("Why is the meaning of life 42?"):
+#         print(chunk, end="", flush=True)
+#     print()
