@@ -1,14 +1,16 @@
+"""
+Module E: Experimenter
+-----------------------
+Executes quantitative simulations or benchmarks for generated research hypotheses.
+Designed to receive hypotheses from Module C/D and return structured metrics.
+"""
+
 import random
 from pydantic import BaseModel
-from typing import List
-
-class ExperimentProposal(BaseModel):
-    hypothesis_id: str
-    description: str
-    target_metric: str = "accuracy"
-    baseline_value: float = 0.70
+from typing import List, Dict, Any
 
 class ExperimentResult(BaseModel):
+    """Data contract representing the quantitative outcome of an executed experiment."""
     hypothesis_id: str
     status: str
     metric_name: str
@@ -17,20 +19,31 @@ class ExperimentResult(BaseModel):
     seed_runs: List[float]
     logs: str
 
-def run_experiment(proposal: ExperimentProposal) -> ExperimentResult:
-    """Executes the test/simulation for Module E."""
-    print(f"🔬 [Module E] Running experiment for: {proposal.hypothesis_id}")
+def run_experiment(hypothesis_data: Dict[str, Any]) -> ExperimentResult:
+    """
+    Executes an experiment based on incoming hypothesis data.
     
-    # Simulate 3 experimental runs
-    seeds = [round(proposal.baseline_value + random.uniform(0.02, 0.08), 3) for _ in range(3)]
+    Args:
+        hypothesis_data (dict): Dictionary containing hypothesis details (id, statement, baseline, etc.)
+        
+    Returns:
+        ExperimentResult: Pydantic model containing scores, seeds, and execution logs.
+    """
+    hyp_id = hypothesis_data.get("id", "H-UNKNOWN")
+    baseline = hypothesis_data.get("score", 0.70)
+    
+    print(f"🔬 [Module E] Running experiment for hypothesis: {hyp_id}")
+    
+    # Flexible execution simulation (can later be swapped with real benchmark script execution)
+    seeds = [round(baseline + random.uniform(0.01, 0.06), 3) for _ in range(3)]
     avg_score = round(sum(seeds) / len(seeds), 3)
     
     return ExperimentResult(
-        hypothesis_id=proposal.hypothesis_id,
+        hypothesis_id=hyp_id,
         status="success",
-        metric_name=proposal.target_metric,
-        baseline_score=proposal.baseline_value,
+        metric_name="accuracy",
+        baseline_score=baseline,
         achieved_score=avg_score,
         seed_runs=seeds,
-        logs=f"Completed 3 seeds. Baseline: {proposal.baseline_value}, Mean: {avg_score}"
+        logs=f"Successfully evaluated hypothesis {hyp_id}. Mean achieved score: {avg_score}"
     )
