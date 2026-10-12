@@ -2,3 +2,4 @@
 .env
 .APvenv
 __pycache__/
+.vscode
