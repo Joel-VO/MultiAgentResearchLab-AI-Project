@@ -1,24 +1,25 @@
-from typing import Literal
+from typing import Literal, Optional
+from pydantic import BaseModel, Field
 
 
-class Gap:
+class Gap(BaseModel):
     id: str
     source: Literal["sparse_region",
                     "missing_combination", "conflict", "future_work"]
     description: str
-    paper_ids: list[str]
+    paper_ids: list[str] = Field(default_factory=list)
 
 
-class Hypothesis:
+class Hypothesis(BaseModel):
     id: str
-    gap_ids: list[str]
+    gap_ids: list[str] = Field(default_factory=list)
     statement: str
     testable_prediction: str
     rationale: str
-    supporting_paper_ids: list[str]
-    assumptions: list[str]
+    supporting_paper_ids: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
     # novelty, evidence_support, feasibility, llm_judge
-    score_parts: dict[str, float]
+    score_parts: dict[str, float] = Field(default_factory=dict)
     score: float
     status: Literal["candidate", "selected", "rejected", "revised"]
 
@@ -28,31 +29,4 @@ class Hypothesis:
 class ResearchRequest:
     topic: str
     seed_papers: list[str]  # DOI, arXiv ID, or title
-    #TODO: budget: Budget  # max_papers, max_depth, fanout_per_node
-
-
-class KBHandle:
-    graph_path: str
-    emb_path: str
-    # query functions: neighbors(id), closest_to(text_or_id, k), citation_path(a, b)
-
-
-class PaperReview:
-    paper_id: str
-    idea: str
-    method: str
-    pros: list[str]
-    cons: list[str]
-    future_work: list[str]  # "not stated" allowed in every text field
-    concepts: list[str]
-    methods: list[str]
-    datasets: list[str]
-    metrics: list[str]
-
-
-class Conflict:
-    id: str
-    type: Literal["finding", "reviewer"]
-    paper_ids: list[str]
-    summary: str
-    evidence_text: str
+    # TODO: budget: Budget  # max_papers, max_depth, fanout_per_node
