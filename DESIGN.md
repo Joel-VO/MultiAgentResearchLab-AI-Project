@@ -144,15 +144,21 @@ class LabState:                    # LangGraph state
 
 5.  **Concept layer.** The per-paper LLM review extracts concepts, methods, datasets, and metrics. Each becomes a typed node linked to its papers. Names are normalized (e.g. “ImageNet-1k” → “ImageNet”) so that set overlaps in Module F match. Gap mining (Module C) and CSP domains (Module D) are built from these nodes.
 
-6.  **Paper review.** The generator model reads each abstract (full text for seed papers only, from arXiv) and fills the `PaperReview` schema. Fields not present in the text are set to “not stated”.
+6.  **Paper review.** The generator model reads each abstract (full text for seed papers only, from arXiv) and fills the `PaperReview` schema. Fields not present in the text are set to “not stated” (`idea`, `method`) or left as an empty list (all list fields).
 
 7.  **Queries.**
 
-    - `closest_to`: cosine top-k over the embeddings.
+    - `closest_to_text(text, k)` and `closest_to_paper(paper_id, k)`: cosine top-k over the embeddings. Vectors are L2-normalised, so a dot product is the cosine.
 
     - `citation_path`: `nx.shortest_path` over citation edges, used to trace influential citation paths.
 
     - `neighbors`: one-hop citation and similarity neighbours.
+
+    - `get_paper(id)`, `get_review(id)`, `get_embeddings(ids)` and `resolve_id(external_id)` (S2 ID, arXiv ID or DOI to the internal ID).
+
+    Other modules open the KB with `open_kb(handle)`, which also exposes the raw `graph`, `embeddings`, `ids` and `topic_vector`, so a module can run its own queries. The interface is implemented in `module_B_literature_kg/interface.py`.
+
+    **Conventions.** Paper IDs are short internal IDs (`P1`, `P2`, ...); `PaperMeta` holds the real IDs. Embedding row *i* belongs to paper `ids[i]`. The graph is a `networkx.MultiDiGraph`: paper nodes are `P1`...; concept-layer nodes are `<type>:<normalised name>` (e.g. `dataset:truthfulqa`) with `type` in `concept`, `method`, `dataset`, `metric`; every edge has a `kind` of `cites`, `similar` (stored in both directions, with `weight`), `has_concept`, `has_method`, `has_dataset` or `has_metric`.
 
 **Conflict detection**
 
@@ -346,7 +352,7 @@ posterior:    mean = α / (α + β)
 
 For each hypothesis `h`:
 
-1.  **Candidate papers:** `h.supporting_paper_ids` plus `kb.closest_to(h.statement, k)`, plus both papers of any `Conflict` touching those candidates.
+1.  **Candidate papers:** `h.supporting_paper_ids` plus `kb.closest_to_text(h.statement, k)`, plus both papers of any `Conflict` touching those candidates.
 
 2.  **Labelling:** the generator model receives `h.statement`, the paper’s `PaperReview`, and its abstract, and returns an `EvidenceLabel`: a direction (`support`, `contradict`, or `neutral`), a type (`direct` or `indirect`), and a `quote`, the sentence from the abstract that justifies the label (schema in the Appendix, Module F):
 
@@ -812,29 +818,63 @@ class ResearchRequest:
 **Output**
 
 ```
-class KBHandle:
-    graph_path: str
-    emb_path: str
-    # query functions: neighbors(id), closest_to(text_or_id, k), citation_path(a, b)
+class KBHandle:                    # paths only; stored in LabState
+    graph_path: str                # node-link JSON of the MultiDiGraph
+    emb_path: str                  # .npy, (n_papers, dim), L2-normalised
+    ids_path: str                  # ids.json, paper IDs in embedding-row order
+    meta_path: str                 # papers.json, {paper_id: PaperMeta}
+    reviews_path: str              # reviews.json, {paper_id: PaperReview}
+    topic_emb_path: str            # .npy, (dim,), the topic vector
+# open_kb(handle, embed_fn) -> KnowledgeBase with: get_paper(id), get_review(id),
+# closest_to_text(text, k), closest_to_paper(id, k), neighbors(id), citation_path(a, b),
+# get_embeddings(ids), resolve_id(external_id), and raw graph / embeddings / ids / topic_vector
+
+class PaperMeta:
+    paper_id: str                  # internal ID, e.g. "P1"
+    title: str
+    abstract: str
+    year: int | None
+    venue: str | None
+    citation_count: int | None
+    s2_id: str | None
+    arxiv_id: str | None
+    doi: str | None
+    is_seed: bool
+    has_full_text: bool
 
 class PaperReview:
     paper_id: str
-    idea: str
-    method: str
-    pros: list[str]
+    title: str
+    idea: str                      # "not stated" if absent
+    method: str                    # "not stated" if absent
+    pros: list[str]                # empty list if not stated (all list fields)
     cons: list[str]
-    future_work: list[str]         # "not stated" allowed in every text field
+    future_work: list[str]
     concepts: list[str]
     methods: list[str]
     datasets: list[str]
     metrics: list[str]
+    evidence_quotes: dict[str, str]    # field name -> supporting quote from the paper
 
 class Conflict:
     id: str
     type: Literal["finding", "reviewer"]
-    paper_ids: list[str]
+    paper_ids: list[str]           # two papers for "finding", one for "reviewer"
     summary: str
     evidence_text: str
+    shared_dataset: str | None     # "finding" only
+    shared_metric: str | None      # "finding" only
+    claim_a: str | None            # "finding" only
+    claim_b: str | None            # "finding" only
+
+class ScoredPaper:                 # returned by closest_to_*
+    paper_id: str
+    score: float                   # cosine similarity
+
+class Neighbor:                    # returned by neighbors
+    paper_id: str
+    kind: Literal["cites", "cited_by", "similar"]
+    weight: float | None
 ```
 
 ## Module C: Hypothesis Generation

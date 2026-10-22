@@ -23,7 +23,7 @@ pymupdf
 openreview-py
 
 # KB, belief model, RL
-networkx
+networkx>=3.4
 numpy
 scipy
 

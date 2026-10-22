@@ -1,4 +1,5 @@
 /venv
 .env
 .APvenv
+__pycache__/
 .vscode
