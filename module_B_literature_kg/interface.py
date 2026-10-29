@@ -90,6 +90,7 @@ class Conflict(BaseModel):
     shared_metric: Optional[str] = None
     claim_a: Optional[str] = None
     claim_b: Optional[str] = None
+    score_variance: Optional[float] = None  # reviewer conflicts only
 
 
 class ScoredPaper(BaseModel):
@@ -169,6 +170,10 @@ class KnowledgeBase:
         v = np.asarray(self._embed_fn(text), dtype=float)
         v = v / (np.linalg.norm(v) or 1.0)
         return self._top_k(self.embeddings @ v, k)
+
+    def closest_to(self, text: str, k: int = 10) -> list[ScoredPaper]:
+        """Compatibility alias for semantic search by query text."""
+        return self.closest_to_text(text, k)
 
     def _top_k(self, sims, k, skip=None) -> list[ScoredPaper]:
         order = np.argsort(-sims)
