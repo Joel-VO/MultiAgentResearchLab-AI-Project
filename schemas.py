@@ -1,17 +1,21 @@
-"""Shared data types for the research lab graph. Owned by Module B; every module imports from here.
+"""Shared data types for the research lab graph. Owned by Module A (tooling); every module imports from here.
+
+Precedence rule: this file is the project-wide overview. interface.py is the contract written for
+Module B (literature / knowledge base). Where the two disagree about a type Module B owns, interface.py
+wins and this file mirrors it. tests/test_schema_sync.py checks that the mirrored classes stay identical.
 
 Conventions
 - Every object has a stable string ID with a prefix (below). Objects refer to each other by ID,
   never by embedding one object inside another, so each object has one copy in the state.
 - `...Draft` classes are what an LLM returns. The node adds IDs and provenance by building the
-  full class from the draft, e.g. `PaperReview(paper_id=pid, source="abstract", **draft.model_dump())`.
+  full class from the draft, e.g. `PaperReview(paper_id=pid, title=meta.title, **draft.model_dump())`.
   LLMs never generate IDs, except when returning IDs they were given in the prompt.
 - Collections in LabState are dicts keyed by ID and merged with `upsert`, so a node can add a new
   object or replace an existing one by returning only that object. The ledger, reviews and the RL
   log are append-only lists.
 
 ID prefixes
-  RQ request · (Semantic Scholar paperId) paper · CF conflict · G gap · H hypothesis · PR proposal
+  RQ request · P1, P2, ... paper (internal; the real S2/arXiv/DOI ids live in PaperMeta) · CF conflict · G gap · H hypothesis · PR proposal
   X experiment · D dataset · EV evidence · R review · T revision task · W workflow task · L ledger
 """
 
@@ -22,7 +26,7 @@ This file is a sample on what the types can and would be like. Should make it ea
 
 import operator
 import uuid
-from typing import Annotated, Literal, TypedDict, get_args
+from typing import Annotated, Literal, Optional, TypedDict, get_args
 
 from pydantic import BaseModel, Field
 
@@ -78,69 +82,91 @@ class LedgerEntry(BaseModel):
     tag: Tag
     source_ids: list[str] = []  # paper, experiment, or review IDs
     hypothesis_id: str | None = None  # lets the reviewer pull the excerpt for one hypothesis
-    produced_by: str  # node name, e.g. "A.conflicts"
+    produced_by: str  # node name, e.g. "B.conflicts"
     confidence: float = 1.0
     round: int = 0
 
 
-# ---------------------------------------------------------------- Module A
-
-class Paper(BaseModel):
-    id: str  # Semantic Scholar paperId
-    title: str
-    abstract: str | None = None
-    year: int | None = None
-    venue: str | None = None
-    peer_reviewed: bool = False
-    citation_count: int = 0
-    arxiv_id: str | None = None
-    doi: str | None = None
-    openreview_id: str | None = None
-    fulltext_path: str | None = None  # seed papers only
-    depth: int = 0  # search depth at which it was found
-    relevance: float = 0.0  # cosine to the topic embedding
-
+# ---------------------------------------------------------------- Module B (literature, knowledge base)
+# KBHandle, PaperMeta, PaperReview and Conflict are MIRRORED from interface.py (interface.py wins).
+# Do not edit them here alone: change interface.py first, then copy the change here.
 
 class KBHandle(BaseModel):
-    """Paths only. Query functions live in kb.py: KB.load(handle).closest_to(...), .citation_path(...)."""
-    graph_path: str
-    emb_path: str
-    ids_path: str  # paper ID for each row of emb_path
-    papers_path: str  # JSON list of Paper
-    embedding_model: str
-    n_papers: int
+    """Lives in LabState.kb. Paths only. Query functions live in interface.py: open_kb(handle)."""
+    graph_path: str        # node-link JSON of the MultiDiGraph
+    emb_path: str          # .npy, shape (n_papers, dim), L2-normalised
+    ids_path: str          # ids.json: ["P1", "P2", ...] in embedding-row order
+    meta_path: str         # papers.json: {paper_id: PaperMeta}
+    reviews_path: str      # reviews.json: {paper_id: PaperReview}
+    topic_emb_path: str    # .npy, shape (dim,), the topic query vector
+
+
+class PaperMeta(BaseModel):
+    paper_id: str                      # internal "P1"
+    title: str
+    abstract: str = ""
+    year: Optional[int] = None
+    venue: Optional[str] = None
+    citation_count: Optional[int] = None
+    s2_id: Optional[str] = None        # Semantic Scholar paperId
+    arxiv_id: Optional[str] = None
+    doi: Optional[str] = None
+    is_seed: bool = False
+    has_full_text: bool = False
 
 
 class PaperReviewDraft(BaseModel):
-    idea: str
-    method: str
-    pros: list[str]
-    cons: list[str]
-    future_work: list[str]  # "not stated" allowed in every text field
-    concepts: list[str]
-    methods: list[str]
-    datasets: list[str]
-    metrics: list[str]
+    """What the LLM returns for one paper. The node builds the full PaperReview from it:
+    PaperReview(paper_id=pid, title=meta.title, **draft.model_dump())"""
+    idea: str = "not stated"
+    method: str = "not stated"
+    pros: list[str] = Field(default_factory=list)          # [] == not stated
+    cons: list[str] = Field(default_factory=list)
+    future_work: list[str] = Field(default_factory=list)
+    concepts: list[str] = Field(default_factory=list)
+    methods: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
 
 
-class PaperReview(PaperReviewDraft):
+class PaperReview(BaseModel):
     paper_id: str
-    source: Literal["abstract", "fulltext"]
+    title: str = ""
+    idea: str = "not stated"
+    method: str = "not stated"
+    pros: list[str] = Field(default_factory=list)          # [] == not stated
+    cons: list[str] = Field(default_factory=list)
+    future_work: list[str] = Field(default_factory=list)
+    concepts: list[str] = Field(default_factory=list)
+    methods: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+    # field name -> exact quote from the paper that supports it (from the quote check)
+    evidence_quotes: dict[str, str] = Field(default_factory=dict)
 
 
 class ConflictCheck(BaseModel):  # LLM output for one paper pair
     relation: Literal["contradict", "agree", "unrelated"]
     summary: str
     evidence_text: str
+    # optional extras the LLM can fill; copied into Conflict when relation == "contradict"
+    shared_dataset: Optional[str] = None
+    shared_metric: Optional[str] = None
+    claim_a: Optional[str] = None
+    claim_b: Optional[str] = None
 
 
 class Conflict(BaseModel):
-    id: str = Field(default_factory=lambda: new_id("CF"))
+    id: str
     type: Literal["finding", "reviewer"]
-    paper_ids: list[str]
+    paper_ids: list[str]               # 2 papers for "finding", 1 for "reviewer"
     summary: str
     evidence_text: str
-    score_variance: float | None = None  # reviewer conflicts only
+    # extras, filled for type == "finding" (None otherwise)
+    shared_dataset: Optional[str] = None
+    shared_metric: Optional[str] = None
+    claim_a: Optional[str] = None
+    claim_b: Optional[str] = None
 
 
 # ---------------------------------------------------------------- Module C
@@ -226,7 +252,7 @@ class ExperimentResult(BaseModel):
     round: int = 0
 
 
-# ---------------------------------------------------------------- Module B tool I/O
+# ---------------------------------------------------------------- Module A tool I/O
 
 class DatasetRequest(BaseModel):
     name: str
@@ -409,9 +435,9 @@ class LabState(TypedDict, total=False):
     # workflow tracker (F.1)
     facts: Annotated[dict[str, bool], upsert]
     tasks: Annotated[dict[str, Task], upsert]
-    # A
+    # B (literature)
     kb: KBHandle
-    paper_reviews: Annotated[dict[str, PaperReview], upsert]  # keyed by paper_id
+    paper_reviews: Annotated[dict[str, PaperReview], upsert]  # keyed by internal paper_id ("P1")
     conflicts: Annotated[dict[str, Conflict], upsert]
     # C
     gaps: Annotated[dict[str, Gap], upsert]
@@ -426,6 +452,6 @@ class LabState(TypedDict, total=False):
     beliefs: Annotated[dict[str, BeliefState], upsert]  # keyed by hypothesis_id
     reviews: Annotated[list[Review], operator.add]
     revision_tasks: Annotated[dict[str, RevisionTask], upsert]
-    # B
+    # A (tooling)
     ledger: Annotated[list[LedgerEntry], operator.add]
     report_path: str | None
