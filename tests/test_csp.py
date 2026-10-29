@@ -212,6 +212,33 @@ def test_is_deterministic_apart_from_the_generated_id():
     assert a == b
 
 
+# ---------------------------------------------------------------- real Module B graph
+def _real_b_graph():
+    """Graph made by Module B's own build_graph(), not a hand-written fake."""
+    import numpy as np
+    from module_B_literature_kg.b3_graph import build_graph
+    papers = [{"paper_id": f"P{i}", "title": f"paper {i}"} for i in range(1, 5)]
+    emb = np.random.default_rng(0).normal(size=(4, 8))
+    rev = lambda pid, **kw: {"paper_id": pid, **kw}  # noqa: E731
+    reviews = [
+        rev("P1", methods=["Self-Verification"], datasets=["TruthfulQA"], metrics=["Accuracy"]),
+        rev("P2", methods=["Retrieval"], datasets=["TruthfulQA"]),
+        rev("P3", methods=["Verifier Agent"], datasets=["HotpotQA"], metrics=["Accuracy"]),
+        rev("P4", methods=["Self-Verification"], datasets=["TruthfulQA"]),
+    ]
+    return build_graph(papers, emb, reviews=reviews, k=2)
+
+
+def test_works_on_graph_built_by_module_b():
+    # build_graph() lower-cases names and turns hyphens into spaces ("self verification"),
+    # so the catalog is keyed by that normalised name.
+    cat = {"truthfulqa": DatasetInfo("apache-2.0", 1.5), "hotpotqa": DatasetInfo("cc-by-4.0", 2.0)}
+    p = build_proposal(hyp(), make_kb(graph=_real_b_graph()), resources(), cat)
+    assert p.status == "active"
+    assert (p.dataset, p.method, p.baselines, p.metric) == (
+        "truthfulqa", "verifier agent", ["self verification"], "accuracy")
+
+
 if __name__ == "__main__":  # tiny runner so it also works without pytest
     failed = 0
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
