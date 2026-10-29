@@ -67,6 +67,8 @@ D’s workflow tracker gates which step may run at any time. A’s tooling suppo
 
 All modules use these types. Every module returns its payload plus a list of `LedgerEntry` items, which Module A appends to the ledger.
 
+The Pydantic versions in `module_A_tooling/schemas.py` are the source of truth; the blocks here and in the Appendix mirror them. Modules E and F already use it; the other modules move their types in during integration (paper types still live in `module_B_literature_kg/interface.py`).
+
 ```
 class LedgerEntry:
     id: str
@@ -75,6 +77,7 @@ class LedgerEntry:
     source_ids: list[str]          # paper IDs or experiment IDs
     produced_by: str               # module / agent name
     confidence: float
+    hypothesis_id: str | None      # set when the claim is about one hypothesis
 
 class Evidence:
     id: str
@@ -84,6 +87,8 @@ class Evidence:
     type: Literal["direct", "indirect"]
     reliability: float             # 0–1
     similarity: float              # 0–1, setting similarity
+    quote: str | None              # literature evidence only: the verified abstract sentence
+    # id convention: "{hypothesis_id}:{source_id}", so one item per source per hypothesis
 
 class RevisionTask:
     id: str
@@ -307,7 +312,13 @@ The training loop is in the Appendix (Module D).
 
 - **Real runs:** 2–3 hand-written, parameterized experiment scripts. The experimenter agent fills a config (dataset, model, baseline, seeds, ablation flag) rather than writing free-form code. Scripts run through `run_code` in the sandbox. Datasets are obtained only through `fetch_dataset`.
 
-- **Simulated runs:** `metric   Normal(true_effect, noise)` per seed, with failure probability `p_fail`. `true_effect`, `noise`, and `p_fail` are set per scenario.
+- **Simulated runs:** per seed, `baseline ~ Normal(baseline_mean, noise)` and `metric = baseline + Normal(true_effect, noise)` (paired by seed), with failure probability `p_fail`. These are set per scenario in `SimParams`. This is the only mode implemented so far (`module_E_experimenter/runner.py`); `mode="real"` raises `NotImplementedError` until A's sandbox and dataset gate exist.
+
+- **Experiment kind:** taken from the `RevisionTask` type (`baseline`, `ablation`, `analysis`; no task means `main`) and recorded on the result so F can interpret it. For an ablation, `metrics` hold the full method and `baseline_metrics` the method with the component removed.
+
+- **Design text:** one short generator-model call with reasoning disabled; a fixed template is used if the model is unreachable. The critic pass is not implemented yet.
+
+- **Sample inputs:** `module_E_experimenter/samples.py` holds the Section 7 example (H1, its proposal, tasks T1–T3, papers P1–P4) for standalone runs.
 
 - **Minimum seeds:** `MIN_SEEDS = 3` for any result used as evidence.
 
@@ -429,6 +440,8 @@ The `compute_belief` function that implements this rule is in the Appendix (Modu
 **Output:** see the Appendix (Module F).
 
 **Implementation.** The reviewer model (larger, ideally a different family from the generator) runs once per loop round. Every weakness must reference a ledger entry or state that it is an assumption. Revision tasks go to Module D’s RL controller, and their `type` and `severity` fields are what the controller counts.
+
+**Code layout (Module F).** `module_F_reviewer_belief/belief.py` (F.1: `compute_belief`, `experiment_evidence`, `literature_evidence`, `rank`) and `module_F_reviewer_belief/reviewer.py` (F.2: `review`). All LLM calls go through `llm_structured` in Module A's client with an Ollama JSON schema, reasoning disabled, temperature 0 and up to 2 retries. The reviewer model fills a draft; task IDs (`T1`, `T2`, ...) are assigned in code, scores are clamped to 0–10, and a task is also closed when a successful run was made for it. If the model keeps failing, a rule-based review is returned so the loop never stops at the reviewer. Models are set in `config.py` (currently Ollama for both roles; Groq comes later).
 
 # 5. Data Flow: Text and Numbers
 
@@ -1044,15 +1057,21 @@ for episode in range(N_EPISODES):
 class ExperimentResult:
     id: str
     proposal_id: str
+    hypothesis_id: str
+    kind: Literal["main", "baseline", "ablation", "analysis"]
     design: str
     mode: Literal["real", "simulated"]
     metrics: dict[str, list[float]]          # per seed
     baseline_metrics: dict[str, list[float]] # per seed
+    higher_is_better: bool                   # sign of the paired difference
     n_samples: int
     seeds: list[int]
     status: Literal["ok", "failed"]
     error: str | None
+    task_id: str | None                      # RevisionTask this run addresses
     artifacts: list[str]
+
+run_experiment(proposal, hypothesis, task=None, sim=SimParams(), n_seeds=MIN_SEEDS) -> ExperimentResult
 ```
 
 **Evaluation harness**
@@ -1127,9 +1146,14 @@ def compute_belief(h_id, evidence):
 
 ```
 class Review:
+    id: str
+    hypothesis_id: str
     strengths: list[str]
     weaknesses: list[str]          # each states why the weakness matters
     questions: list[str]
-    revision_tasks: list[RevisionTask]
+    revision_tasks: list[RevisionTask]   # new tasks only
+    closed_task_ids: list[str]     # open tasks this review judges addressed
     scores: dict[str, float]       # novelty, soundness, evidence, clarity, overall (0–10)
+
+review(hypothesis, proposal, results, belief, open_tasks=[]) -> Review
 ```

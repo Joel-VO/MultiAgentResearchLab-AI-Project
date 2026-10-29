@@ -58,6 +58,13 @@ bash install.sh
 
 Models, budgets and thresholds are constants at the top of `config.py`.
 
+Modules E and F can be run on their own (from the repo root, with the venv active):
+
+```bash
+python3 -m tests.test_e_f            # offline unit tests, no Ollama needed
+python3 -m tests.test_ef_standalone  # live demo on the DESIGN.md Section 7 example (needs Ollama)
+```
+
 ## Repo layout
 
 One package per module. Directory names follow `DESIGN.md` (module letter plus module name).

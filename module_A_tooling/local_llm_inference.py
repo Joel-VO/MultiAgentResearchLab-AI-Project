@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Optional, TypeVar
 
 import ollama
+from pydantic import BaseModel, ValidationError
 
 
 DEFAULT_HOST = "http://localhost:11434" # this is the standard host path, change as needed.
@@ -24,6 +25,7 @@ class OllamaClient:
     def generate(self, 
                 user_prompt:str, # pass in the user prompt containing details of the hypothesis + paper details
                 system_prompt:Optional[str] = None, # None is fine but make edits else it'll not work well
+                format=None, # optional JSON schema (dict) or "json" to force structured output
                 **options
                 ):
         """
@@ -34,6 +36,7 @@ class OllamaClient:
             prompt=user_prompt, 
             system=system_prompt,
             think=self.think,
+            format=format,
             options=options
         )
         return response["response"] 
@@ -66,6 +69,30 @@ class OllamaClient:
         Makes it easy for role identification.
         """
         return response["messages"]["content"] 
+
+
+T = TypeVar("T", bound=BaseModel)
+
+
+def llm_structured(prompt: str,
+                   schema: type[T],
+                   client: OllamaClient,
+                   system: Optional[str] = None,
+                   retries: int = 2,
+                   **options) -> T:
+    """
+    Asks the model for JSON matching `schema` and returns the validated object.
+    Retries `retries` extra times on invalid output, then raises the last error.
+    """
+    last_error = None
+    for _ in range(retries + 1):
+        text = client.generate(user_prompt=prompt, system_prompt=system,
+                               format=schema.model_json_schema(), **options)
+        try:
+            return schema.model_validate_json(text)
+        except ValidationError as e:
+            last_error = e
+    raise last_error
 
 # if __name__  == "__main__": # for debugging purposes only.
 #     client = OllamaClient()
