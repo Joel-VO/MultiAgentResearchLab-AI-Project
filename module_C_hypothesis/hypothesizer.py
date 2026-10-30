@@ -1,16 +1,28 @@
 import json
-from collections import Counter, defaultdict
-from itertools import combinations
-from typing import Any
+from collections import defaultdict
 from module_A_tooling.local_llm_inference import OllamaClient
 from module_B_literature_kg.interface import (
     KBHandle,
     PaperReview,
     Conflict,
     KnowledgeBase,
+    open_kb,
 )
-from classes import Gap, Hypothesis, ResearchRequest
+from classes import Gap, Hypothesis, ResearchRequest, ResearchAgent
 
+AGENT_SPEC = """
+You are a researcher working to identify and evaluate testable hypotheses from research gaps.
+
+Your responsibilities:
+1. Propose novel, specific, and testable research hypotheses.
+2. Examine relevant papers, evidence, and identified research gaps.
+3. Critically evaluate hypotheses proposed by other agents by identifying unsupported assumptions, weaknesses, and alternative explanations.
+5. Revise your own hypotheses in response to constructive criticism.
+6. Provide evidence-based reasoning and distinguish facts from speculation.
+7. State testable predictions, rationale, assumptions, and supporting paper IDs.
+
+During each discussion phase, follow the task assigned in the prompt: research, critique, or revision. You remain capable of all three.
+"""
 
 def mine_gaps(
     kb: Any,
@@ -22,355 +34,193 @@ def mine_gaps(
     sparse_similarity_threshold: float = 0.65,
     min_sparse_region_size: int = 2,
 ) -> list[Gap]:
-    """
-    Discover research gaps using deterministic, rule-based methods.
-
-    Gap sources:
-      - sparse_region
-      - missing_combination
-      - conflict
-      - future_work
-
-    No LLM calls are made in this function.
-    """
-
+    kb = KnowledgeBase(kbhandle)
     gaps: list[Gap] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
 
-    def add_gap(
-        source: str,
-        description: str,
-        paper_ids: list[str] | None = None,
-    ) -> None:
-        """Add a gap once, using a stable key to avoid duplicates."""
-        ids = sorted(set(paper_ids or []))
-        key = (
-            source,
-            " ".join(description.lower().split()),
-            tuple(ids),
-        )
+    def add_gap(source: str, description: str, paper_ids: list[str]) -> None:
+        paper_ids = sorted({pid for pid in paper_ids if pid in valid_ids})
+        description = description.strip()
+        key = (source, description.casefold(), tuple(paper_ids))
 
         if key in seen or len(gaps) >= max_gaps:
             return
 
         seen.add(key)
-        gaps.append(
-            Gap(
-                id=f"G{len(gaps) + 1}",
-                source=source,
-                description=description.strip(),
-                paper_ids=ids,
-            )
-        )
-
-    # ---------------------------------------------------------
-    # 1. Future work and limitations from paper reviews
-    # ---------------------------------------------------------
-    valid_reviews = [
-        review
-        for review in reviews
-        if getattr(review, "paper_id", None)
-    ]
-
-    for review in valid_reviews:
-        paper_id = review.paper_id
-        title = getattr(review, "title", "") or paper_id
-
-        future_work = getattr(review, "future_work", []) or []
-        limitations = getattr(review, "cons", []) or []
-
-        # Future work is explicitly represented in the Gap schema.
-        for item in future_work:
-            if not isinstance(item, str):
-                continue
-
-            item = item.strip()
-            if not item or item.lower() in {
-                "not stated",
-                "none",
-                "n/a",
-                "unknown",
-            }:
-                continue
-
-            add_gap(
-                source="future_work",
-                description=(
-                    f"Future-work opportunity identified in {paper_id} "
-                    f"({title}): {item}"
-                ),
-                paper_ids=[paper_id],
-            )
-
-        # The shared Gap schema has no separate "limitation" source,
-        # so limitations are represented as future-work opportunities.
-        for item in limitations:
-            if not isinstance(item, str):
-                continue
-
-            item = item.strip()
-            if not item or item.lower() in {
-                "not stated",
-                "none",
-                "n/a",
-                "unknown",
-            }:
-                continue
-
-            add_gap(
-                source="future_work",
-                description=(
-                    f"Potential limitation to investigate in {paper_id} "
-                    f"({title}): {item}"
-                ),
-                paper_ids=[paper_id],
-            )
-
-    # ---------------------------------------------------------
-    # 2. Contradictory findings and reviewer disagreements
-    # ---------------------------------------------------------
-    for conflict in conflicts:
-        paper_ids = getattr(conflict, "paper_ids", []) or []
-        summary = getattr(conflict, "summary", "") or ""
-        evidence = getattr(conflict, "evidence_text", "") or ""
-        conflict_type = getattr(conflict, "type", "finding")
-
-        description = (
-            f"Research gap arising from {conflict_type} conflict "
-            f"{getattr(conflict, 'id', 'unknown')}: {summary}"
-        )
-
-        if evidence.strip():
-            description += f" Evidence: {evidence.strip()}"
-
-        add_gap(
-            source="conflict",
+        gaps.append(Gap(
+            id=f"G{len(gaps) + 1}",
+            source=source,
             description=description,
             paper_ids=paper_ids,
-        )
+        ))
 
-    # ---------------------------------------------------------
-    # 3. Missing concept/method and method/dataset combinations
-    # ---------------------------------------------------------
-    concept_papers: dict[str, set[str]] = defaultdict(set)
-    method_papers: dict[str, set[str]] = defaultdict(set)
-    dataset_papers: dict[str, set[str]] = defaultdict(set)
+    # Merge KB reviews with the current run's reviews.
+    # Explicitly supplied reviews take precedence.
+    review_by_id = {
+        pid: review
+        for pid in kb.ids
+        if (review := kb.get_review(pid)) is not None
+    }
+    review_by_id.update({
+        review.paper_id: review
+        for review in reviews
+        if review.paper_id in valid_ids
+    })
+    all_reviews = list(review_by_id.values())
 
-    concept_method_pairs: set[tuple[str, str]] = set()
-    method_dataset_pairs: set[tuple[str, str]] = set()
+    # 1. Explicit future work.
+    for review in all_reviews:
+        for item in review.future_work:
+            add_gap(
+                "future_work",
+                f"Unaddressed future work: {item.strip()}",
+                [review.paper_id],
+            )
 
-    def clean_items(values: Any) -> list[str]:
-        """Normalize strings and remove empty or unspecified entries."""
-        if not values:
-            return []
+    # 2. Conflicts already identified by Module B.
+    for item in conflict:
+        if not item.paper_ids:
+            continue
 
-        if isinstance(values, str):
-            values = [values]
+        if item.type == "finding":
+            description = (
+                f"Conflicting findings: {item.summary}. "
+                f"Evidence: {item.evidence_text}"
+            )
+        else:
+            description = (
+                f"Reviewer-identified issue: {item.summary}. "
+                f"Evidence: {item.evidence_text}"
+            )
 
-        result = []
-        for value in values:
-            if not isinstance(value, str):
-                continue
+        add_gap("conflict", description, item.paper_ids)
 
-            value = " ".join(value.strip().split())
-            if value and value.lower() not in {
-                "not stated",
-                "none",
-                "n/a",
-                "unknown",
-            }:
-                result.append(value)
+    # 3. Build paper coverage from graph edges.
+    # Graph nodes use types and edge kinds defined in interface.py.
+    graph_coverage: dict[str, set[str]] = defaultdict(set)
 
-        return sorted(set(result), key=str.casefold)
-
-    for review in valid_reviews:
-        paper_id = review.paper_id
-
-        concepts = clean_items(getattr(review, "concepts", []))
-        methods = clean_items(getattr(review, "methods", []))
-        datasets = clean_items(getattr(review, "datasets", []))
-
-        for concept in concepts:
-            concept_papers[concept].add(paper_id)
-
-        for method in methods:
-            method_papers[method].add(paper_id)
-
-        for dataset in datasets:
-            dataset_papers[dataset].add(paper_id)
-
-        for concept in concepts:
-            for method in methods:
-                concept_method_pairs.add((concept, method))
-
-        for method in methods:
-            for dataset in datasets:
-                method_dataset_pairs.add((method, dataset))
-
-    all_paper_ids = {
-        review.paper_id for review in valid_reviews
+    edge_to_type = {
+        "has_concept": "concept",
+        "has_method": "method",
+        "has_dataset": "dataset",
+        "has_metric": "metric",
     }
 
-    # Only report pairs among terms observed in the reviewed literature.
-    concepts = sorted(concept_papers, key=str.casefold)
-    methods = sorted(method_papers, key=str.casefold)
-    datasets = sorted(dataset_papers, key=str.casefold)
+    for paper_id in kb.ids:
+        if paper_id not in kb.graph:
+            continue
 
-    for concept in concepts:
-        for method in methods:
-            if (concept, method) in concept_method_pairs:
-                continue
+        for _, target, attrs in kb.graph.out_edges(
+            paper_id, data=True
+        ):
+            kind = attrs.get("kind")
+            category = edge_to_type.get(kind)
 
-            relevant_ids = sorted(
-                concept_papers[concept] | method_papers[method]
-            )
+            if category and target in kb.graph:
+                graph_coverage[target].add(paper_id)
 
-            add_gap(
-                source="missing_combination",
-                description=(
-                    f"No reviewed paper combines concept '{concept}' "
-                    f"with method '{method}'. Investigate whether "
-                    f"combining them could address the research topic: "
-                    f"{request.topic}"
-                ),
-                paper_ids=relevant_ids,
-            )
+    # 4. Sparse regions: graph concepts supported by only one paper.
+    for node, paper_ids in sorted(graph_coverage.items()):
+        if len(paper_ids) != 1:
+            continue
 
-            if len(gaps) >= max_gaps:
-                return gaps
+        attrs = kb.graph.nodes[node]
+        category = attrs.get("type", "concept")
+        name = attrs.get("name", node)
 
-    for method in methods:
-        for dataset in datasets:
-            if (method, dataset) in method_dataset_pairs:
-                continue
+        add_gap(
+            "sparse_region",
+            (
+                f"The {category} '{name}' is connected to only one "
+                f"paper in the available knowledge graph. Its role "
+                f"in the research topic '{request.topic}' may warrant "
+                f"further investigation."
+            ),
+            list(paper_ids),
+        )
 
-            relevant_ids = sorted(
-                method_papers[method] | dataset_papers[dataset]
-            )
+    # 5. Missing combinations: methods with datasets or metrics.
+    # Use reviewed co-occurrence rather than assuming graph edges
+    # establish that a method and dataset were used together.
+    category_papers: dict[str, dict[str, set[str]]] = {
+        "method": defaultdict(set),
+        "dataset": defaultdict(set),
+        "metric": defaultdict(set),
+    }
+    observed_pairs: dict[str, set[tuple[str, str]]] = {
+        "method_dataset": set(),
+        "method_metric": set(),
+    }
 
-            add_gap(
-                source="missing_combination",
-                description=(
-                    f"No reviewed paper combines method '{method}' "
-                    f"with dataset '{dataset}'. Evaluate whether this "
-                    f"combination is appropriate for the research topic: "
-                    f"{request.topic}"
-                ),
-                paper_ids=relevant_ids,
-            )
-
-            if len(gaps) >= max_gaps:
-                return gaps
-
-    # ---------------------------------------------------------
-    # 4. Sparse regions in the similarity graph near the topic
-    # ---------------------------------------------------------
-    graph = getattr(kb, "graph", None)
-
-    if graph is not None and hasattr(graph, "nodes"):
-        # Restrict analysis to paper nodes.
-        paper_nodes = {
-            node
-            for node, attrs in graph.nodes(data=True)
-            if attrs.get("type") == "paper"
+    for review in all_reviews:
+        methods = {
+            value.strip().casefold()
+            for value in review.methods if value.strip()
+        }
+        datasets = {
+            value.strip().casefold()
+            for value in review.datasets if value.strip()
+        }
+        metrics = {
+            value.strip().casefold()
+            for value in review.metrics if value.strip()
         }
 
-        # Use the knowledge base's topic vector when available.
-        topic_vector = getattr(kb, "topic_vector", None)
+        for value in methods:
+            category_papers["method"][value].add(review.paper_id)
+        for value in datasets:
+            category_papers["dataset"][value].add(review.paper_id)
+        for value in metrics:
+            category_papers["metric"][value].add(review.paper_id)
 
-        if callable(topic_vector):
-            try:
-                topic_vector = topic_vector()
-            except Exception:
-                topic_vector = None
+        observed_pairs["method_dataset"].update(
+            (method, dataset)
+            for method in methods
+            for dataset in datasets
+        )
+        observed_pairs["method_metric"].update(
+            (method, metric)
+            for method in methods
+            for metric in metrics
+        )
 
-        # Determine which papers are near the topic.
-        # If no usable topic vector is available, retain the paper
-        # nodes in the graph rather than inventing topic similarities.
-        near_topic: set[str] = set()
+    for target_type in ("dataset", "metric"):
+        pair_type = f"method_{target_type}"
+        target_label = target_type
 
-        if topic_vector is not None and hasattr(kb, "closest_to_text"):
-            # This method expects text, so do not pass a vector to it.
-            # Use the request topic for the nearest-paper query instead.
-            try:
-                nearest = kb.closest_to_text(
-                    request.topic,
-                    k=max(1, len(paper_nodes)),
-                )
+        methods = category_papers["method"]
+        targets = category_papers[target_type]
 
-                for item in nearest or []:
-                    if isinstance(item, str):
-                        near_topic.add(item)
-                    elif isinstance(item, (tuple, list)) and item:
-                        near_topic.add(str(item[0]))
-                    elif hasattr(item, "paper_id"):
-                        near_topic.add(str(item.paper_id))
+        for method, method_papers in sorted(methods.items()):
+            # Avoid suggesting combinations based on isolated mentions.
+            if len(method_papers) < 2:
+                continue
 
-            except (TypeError, ValueError, AttributeError):
-                near_topic = set()
-
-        # If topic-neighbor lookup is unavailable, skip sparse-region
-        # discovery rather than incorrectly claiming papers are near topic.
-        if near_topic:
-            near_topic &= paper_nodes
-
-            # Similarity edges indicate semantic closeness. Citation
-            # edges are not treated as semantic similarity.
-            similarity_graph = graph.subgraph(near_topic).copy()
-
-            for u, v, attrs in graph.edges(data=True):
-                if u not in near_topic or v not in near_topic:
+            for target, target_papers in sorted(targets.items()):
+                if len(target_papers) < 2:
                     continue
 
-                if attrs.get("kind") != "similar":
+                if (method, target) in observed_pairs[pair_type]:
                     continue
 
-                weight = attrs.get("weight")
-
-                try:
-                    weight = float(weight)
-                except (TypeError, ValueError):
-                    continue
-
-                if weight >= sparse_similarity_threshold:
-                    similarity_graph.add_edge(u, v, weight=weight)
-
-            # Low-degree papers in the topic neighborhood are candidates
-            # for sparse regions. Group connected candidates to avoid
-            # emitting one gap for every isolated paper.
-            sparse_nodes = {
-                node
-                for node in near_topic
-                if similarity_graph.degree(node) < min_sparse_region_size
-            }
-
-            sparse_subgraph = similarity_graph.subgraph(sparse_nodes)
-
-            for component in __import__("networkx").connected_components(
-                sparse_subgraph
-            ):
-                component_ids = sorted(str(node) for node in component)
-
-                if not component_ids:
-                    continue
+                supporting_ids = sorted(method_papers | target_papers)
 
                 add_gap(
-                    source="sparse_region",
-                    description=(
-                        f"Potentially sparse semantic region near the "
-                        f"research topic '{request.topic}', containing "
-                        f"{len(component_ids)} paper(s): "
-                        f"{', '.join(component_ids)}. Investigate whether "
-                        f"this region represents an underexplored direction."
+                    "missing_combination",
+                    (
+                        f"The method '{method}' and {target_label} "
+                        f"'{target}' appear independently in the "
+                        f"reviewed corpus but never co-occur in a "
+                        f"review. Investigate whether evaluating this "
+                        f"combination would address a meaningful "
+                        f"question about '{request.topic}'. This is "
+                        f"a corpus-level observation, not proof of "
+                        f"global novelty."
                     ),
-                    paper_ids=component_ids,
+                    supporting_ids,
                 )
 
-                if len(gaps) >= max_gaps:
-                    return gaps
-
     return gaps
-
 
 def hypothesise(
     kb: KBHandle,
@@ -378,226 +228,205 @@ def hypothesise(
     conflict: list[Conflict],
     request: ResearchRequest,
     gaps: list[Gap],
+    embed_fn=None,
+    n_agents: int = 8,
+    k_iterations: int = 5,
+    z_hypotheses: int = 3,
+    weights: dict[str, float] | None = None,
 ) -> list[Hypothesis]:
-    knowledge_base = KnowledgeBase(kb)
-    llm = OllamaClient()
+    """Generate and score hypotheses through independent researcher/critic agents.
 
-    valid_ids = set(knowledge_base.ids)
+    Gap discovery remains rule-based in mine_gaps(). Each agent owns a distinct
+    OllamaClient and private memory. Messages are exchanged through a shared,
+    gap-specific discussion. The lead performs a separate final synthesis call.
+    """
+    if n_agents < 3 or k_iterations < 1 or z_hypotheses < 1:
+        raise ValueError(
+            "Require n_agents >= 3, k_iterations >= 1, and z_hypotheses >= 1.")
+
+    kb_obj = open_kb(kb, embed_fn=embed_fn)
+    valid_ids = set(kb_obj.ids)
     review_by_id = {
-        review.paper_id: review
-        for review in reviews
-        if review.paper_id in valid_ids
+        pid: review for pid in kb_obj.ids
+        if (review := kb_obj.get_review(pid)) is not None
     }
+    review_by_id.update(
+        {r.paper_id: r for r in reviews if r.paper_id in valid_ids})
 
-    # Use KB reviews as a fallback for papers not in the supplied list.
-    for paper_id in knowledge_base.ids:
-        if paper_id not in review_by_id:
-            review = knowledge_base.get_review(paper_id)
-            if review is not None:
-                review_by_id[paper_id] = review
+    weights = weights or {
+        "novelty": 0.30, "evidence_support": 0.30, "feasibility": 0.20, "llm_judge": 0.20}
+    required_scores = {"novelty", "evidence_support",
+                       "feasibility", "llm_judge"}
+    if set(weights) != required_scores:
+        raise ValueError(f"Weights must have exactly {required_scores}.")
+    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or v < 0 for v in weights.values()):
+        raise ValueError("Weights must be finite and non-negative.")
+    weight_sum = sum(weights.values())
+    if weight_sum <= 0:
+        raise ValueError("At least one score weight must be positive.")
+    weights = {key: value / weight_sum for key, value in weights.items()}
 
-    conflicts_by_paper: dict[str, list[Conflict]] = {}
+    def novelty_score(statement: str) -> float:
+        if embed_fn is None:
+            # No embedding function means novelty cannot be computed faithfully.
+            return 0.5
+        neighbors = kb_obj.closest_to_text(statement, k=len(kb_obj.ids))
+        if not neighbors:
+            return 1.0
+        max_cosine = max(float(p.score) for p in neighbors)
+        return max(0.0, min(1.0, 1.0 - max_cosine))
+
+    conflicts_by_paper: dict[str, list[dict]] = defaultdict(list)
     for item in conflict:
-        for paper_id in item.paper_ids:
-            conflicts_by_paper.setdefault(paper_id, []).append(item)
+        ids = [pid for pid in item.paper_ids if pid in valid_ids]
+        for pid in ids:
+            conflicts_by_paper[pid].append({
+                "id": item.id, "type": item.type, "summary": item.summary,
+                "evidence_text": item.evidence_text, "paper_ids": ids,
+                "claim_a": getattr(item, "claim_a", None),
+                "claim_b": getattr(item, "claim_b", None),
+            })
 
-    system_prompt = """
-You are a careful scientific research assistant.
-
-Generate testable research hypotheses from the supplied research gap
-and evidence. Do not invent paper findings, citations, or experiments
-that are claimed to have already occurred.
-
-Requirements:
-- Each hypothesis must make a specific, falsifiable claim.
-- Its testable_prediction must describe an observable result.
-- Its rationale must explain how the supplied evidence motivates it.
-- State uncertain premises as assumptions.
-- Support hypotheses only with supplied paper IDs.
-- Do not claim global novelty from absence in the supplied corpus.
-- Prefer a small number of strong hypotheses over many weak ones.
-- Scores must be numbers between 0 and 1.
-- Scores are preliminary estimates, not verified scientific facts.
-
-Return only valid JSON in this structure:
-{
-  "hypotheses": [
-    {
-      "statement": "...",
-      "testable_prediction": "...",
-      "rationale": "...",
-      "supporting_paper_ids": ["P1"],
-      "assumptions": [],
-      "score_parts": {
-        "novelty": 0.5,
-        "evidence_support": 0.7,
-        "feasibility": 0.8,
-        "llm_judge": 0.6
-      }
-    }
-  ]
-}
-
-If no defensible hypothesis can be generated, return:
-{"hypotheses": []}
-"""
-
-    hypotheses: list[Hypothesis] = []
-    seen_statements: set[str] = set()
+    all_candidates: list[dict] = []
+    failures: list[str] = []
 
     for gap in gaps:
-        # Restrict evidence to the papers associated with this gap.
-        paper_ids = [
-            paper_id for paper_id in gap.paper_ids
-            if paper_id in valid_ids
-        ]
-
+        evidence_ids = sorted(pid for pid in gap.paper_ids if pid in valid_ids)
         paper_evidence = []
-        for paper_id in paper_ids:
-            meta = knowledge_base.get_paper(paper_id)
-            review = review_by_id.get(paper_id)
-
+        for pid in evidence_ids:
+            meta = kb_obj.get_paper(pid)
+            review = review_by_id.get(pid)
+            if meta is None:
+                continue
             paper_evidence.append({
-                "paper_id": paper_id,
-                "title": meta.title,
-                "abstract": meta.abstract,
-                "year": meta.year,
+                "paper_id": pid, "title": meta.title, "abstract": meta.abstract,
+                "year": meta.year, "citation_count": meta.citation_count,
                 "idea": review.idea if review else "not stated",
                 "method": review.method if review else "not stated",
-                "pros": review.pros if review else [],
-                "cons": review.cons if review else [],
+                "pros": review.pros if review else [], "cons": review.cons if review else [],
                 "future_work": review.future_work if review else [],
-                "concepts": review.concepts if review else [],
-                "methods": review.methods if review else [],
-                "datasets": review.datasets if review else [],
-                "metrics": review.metrics if review else [],
-                "evidence_quotes": (
-                    review.evidence_quotes if review else {}
-                ),
+                "concepts": review.concepts if review else [], "methods": review.methods if review else [],
+                "datasets": review.datasets if review else [], "metrics": review.metrics if review else [],
+                "evidence_quotes": review.evidence_quotes if review else {},
+                "conflicts": conflicts_by_paper.get(pid, []),
             })
 
-        relevant_conflicts = [
-            {
-                "type": item.type,
-                "paper_ids": item.paper_ids,
-                "summary": item.summary,
-                "evidence_text": item.evidence_text,
-                "claim_a": item.claim_a,
-                "claim_b": item.claim_b,
-            }
-            for item in conflict
-            if set(item.paper_ids) & set(paper_ids)
+        # Construct distinct client instances once per gap; identities and private memories persist.
+        agents = [
+            ResearchAgent(
+                name=f"agent_{i + 1}",
+                role="research_agent",
+                objective=AGENT_SPEC,
+                llm=OllamaClient(think=False),
+            )
+            for i in range(n_agents)
         ]
+        lead = ResearchAgent(
+            "lead", "Scientific Synthesis Lead",
+            "Synthesize the reviewed candidates, resolve critiques, and return the strongest evidence-grounded hypotheses.",
+            OllamaClient(think=False),
+        )
+        # gap-specific: never leaks into another gap
+        discussion: list[dict] = []
+        gap_candidates: list[dict] = []
 
-        user_prompt = json.dumps({
-            "research_topic": request.topic,
-            "seed_papers": request.seed_papers,
-            "gap": gap.model_dump(),
-            "papers": paper_evidence,
-            "conflicts": relevant_conflicts,
-        }, ensure_ascii=False)
+        for round_no in range(1, k_iterations + 1):
+            # Research phase: independent proposals in round 1; revisions in later rounds.
+            for agent in agents:
+                phase = "initial_proposal" if round_no == 1 else "revision_after_critique"
+                try:
+                    msg = agent.respond(topic=request.topic, gap=gap.model_dump(), evidence=paper_evidence,
+                                        shared_messages=discussion, round_no=round_no, phase=phase)
+                    discussion.append(msg)
+                    for candidate in msg["hypotheses"]:
+                        if isinstance(candidate, dict):
+                            normalized = _normalize_candidate(
+                                candidate, valid_ids, gap.id, agent.name, round_no)
+                            if normalized:
+                                gap_candidates.append(normalized)
+                except Exception as exc:
+                    failures.append(
+                        f"{gap.id} round {round_no} {agent.name}: {exc}")
 
+            # Critic phase: each critic receives proposals and preceding critiques.
+            for agent in agents:
+                try:
+                    msg = agent.respond(topic=request.topic, gap=gap.model_dump(), evidence=paper_evidence,
+                                        shared_messages=discussion, round_no=round_no, phase="critique")
+                    discussion.append(msg)
+                except Exception as exc:
+                    failures.append(
+                        f"{gap.id} round {round_no} {agent.name}: {exc}")
+
+        # A distinct lead call receives the complete gap-specific discussion and synthesizes final candidates.
+        lead_prompt = {
+            "topic": request.topic, "seed_papers": request.seed_papers,
+            "gap": gap.model_dump(), "evidence": paper_evidence,
+            "discussion": discussion,
+            "candidate_pool": gap_candidates,
+            "instructions": [
+                "Synthesize rather than merely repeat the candidate pool.",
+                "Address relevant critiques and discard candidates with fatal flaws.",
+                "Return at most z_hypotheses candidates.",
+                "Supporting paper IDs must come from the supplied evidence IDs.",
+                "Predictions must be observable and falsifiable.",
+                "Scores evidence_support, feasibility, and llm_judge must be numbers from 0 to 1.",
+                "Do not claim global novelty based only on corpus absence.",
+                "Return valid JSON only.",
+            ],
+            "z_hypotheses": z_hypotheses,
+            "required_json": {"hypotheses": [{
+                "statement": "falsifiable claim", "testable_prediction": "observable prediction",
+                "rationale": "synthesis of evidence and critiques", "supporting_paper_ids": [],
+                "assumptions": [], "score_parts": {"evidence_support": 0.0, "feasibility": 0.0, "llm_judge": 0.0},
+            }]},
+        }
         try:
-            raw = llm.generate(
-                user_prompt=user_prompt,
-                system_prompt=system_prompt,
-                format="json",
+            synthesis = lead.llm.generate(
+                user_prompt=json.dumps(
+                    lead_prompt, ensure_ascii=False, default=str),
+                system_prompt="You are the independent scientific synthesis lead. Critically assess the full discussion and return only valid JSON.",
                 temperature=0,
             )
-            result = json.loads(raw)
-        except (ValueError, TypeError, RuntimeError) as exc:
-            # A failed inference for one gap should not discard results
-            # already generated for other gaps.
-            print(f"Hypothesis generation failed for {gap.id}: {exc}")
-            continue
+            final_items = synthesis.get("hypotheses", [])
+            if not isinstance(final_items, list):
+                final_items = []
+            for candidate in final_items:
+                if isinstance(candidate, dict):
+                    normalized = _normalize_candidate(
+                        candidate, valid_ids, gap.id, "lead", k_iterations)
+                    if normalized:
+                        all_candidates.append(normalized)
+        except Exception as exc:
+            failures.append(f"{gap.id} final synthesis lead: {exc}")
+            # Fall back to validated researcher candidates if lead synthesis fails.
+            all_candidates.extend(gap_candidates)
 
-        if not isinstance(result, dict):
-            continue
+    # Exact-text deduplication. Keep the version with strongest evidence score.
+    unique: dict[str, dict] = {}
+    for item in all_candidates:
+        key = " ".join(item["statement"].casefold().split())
+        if key not in unique or item["evidence_support"] > unique[key]["evidence_support"]:
+            unique[key] = item
 
-        candidates = result.get("hypotheses", [])
-        if not isinstance(candidates, list):
-            continue
+    ranked = []
+    for item in unique.values():
+        parts = {
+            "novelty": novelty_score(item["statement"]),
+            "evidence_support": item["evidence_support"],
+            "feasibility": item["feasibility"],
+            "llm_judge": item["llm_judge"],
+        }
+        score = sum(weights[name] * parts[name] for name in weights)
+        ranked.append((score, item, parts))
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
 
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-
-            statement = item.get("statement")
-            prediction = item.get("testable_prediction")
-            rationale = item.get("rationale")
-
-            if not all(
-                isinstance(value, str) and value.strip()
-                for value in (statement, prediction, rationale)
-            ):
-                continue
-
-            statement = statement.strip()
-            dedup_key = statement.casefold()
-
-            if dedup_key in seen_statements:
-                continue
-
-            # Never accept references to papers outside the KB.
-            supporting_ids = item.get("supporting_paper_ids", [])
-            if not isinstance(supporting_ids, list):
-                supporting_ids = []
-
-            supporting_ids = sorted({
-                pid for pid in supporting_ids
-                if isinstance(pid, str)
-                and pid in valid_ids
-                and pid in paper_ids
-            })
-
-            assumptions = item.get("assumptions", [])
-            if not isinstance(assumptions, list):
-                assumptions = []
-
-            assumptions = [
-                value.strip()
-                for value in assumptions
-                if isinstance(value, str) and value.strip()
-            ]
-
-            # Sanitize model-generated score components.
-            raw_parts = item.get("score_parts", {})
-            if not isinstance(raw_parts, dict):
-                raw_parts = {}
-
-            score_names = (
-                "novelty",
-                "evidence_support",
-                "feasibility",
-                "llm_judge",
-            )
-            score_parts = {}
-
-            for name in score_names:
-                value = raw_parts.get(name, 0.0)
-
-                if isinstance(value, (int, float)) and not isinstance(
-                    value, bool
-                ):
-                    score_parts[name] = max(0.0, min(1.0, float(value)))
-                else:
-                    score_parts[name] = 0.0
-
-            # Equal-weight preliminary aggregate.
-            score = sum(score_parts.values()) / len(score_parts)
-
-            seen_statements.add(dedup_key)
-            hypotheses.append(Hypothesis(
-                id=f"H{len(hypotheses) + 1}",
-                gap_ids=[gap.id],
-                statement=statement,
-                testable_prediction=prediction.strip(),
-                rationale=rationale.strip(),
-                supporting_paper_ids=supporting_ids,
-                assumptions=assumptions,
-                score_parts=score_parts,
-                score=score,
-                status="candidate",
-            ))
-
-    return hypotheses
+    output: list[Hypothesis] = []
+    for index, (score, item, parts) in enumerate(ranked[:z_hypotheses], start=1):
+        output.append(Hypothesis(
+            id=f"H{index}", gap_ids=[item["gap_id"]],
+            statement=item["statement"], testable_prediction=item["testable_prediction"],
+            rationale=item["rationale"], supporting_paper_ids=item["supporting_paper_ids"],
+            assumptions=item["assumptions"], score_parts=parts, score=float(score), status="candidate",
+        ))
+    return output
