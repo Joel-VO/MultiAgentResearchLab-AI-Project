@@ -1,5 +1,7 @@
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
+from itertools import combinations
+from typing import Any
 from module_A_tooling.local_llm_inference import OllamaClient
 from module_B_literature_kg.interface import (
     KBHandle,
@@ -11,199 +13,364 @@ from classes import Gap, Hypothesis, ResearchRequest
 
 
 def mine_gaps(
-    kbhandle: KBHandle,
+    kb: Any,
     reviews: list[PaperReview],
-    conflict: list[Conflict],
+    conflicts: list[Conflict],
     request: ResearchRequest,
+    *,
+    max_gaps: int = 50,
+    sparse_similarity_threshold: float = 0.65,
+    min_sparse_region_size: int = 2,
 ) -> list[Gap]:
-    kb = KnowledgeBase(kbhandle)
+    """
+    Discover research gaps using deterministic, rule-based methods.
+
+    Gap sources:
+      - sparse_region
+      - missing_combination
+      - conflict
+      - future_work
+
+    No LLM calls are made in this function.
+    """
+
     gaps: list[Gap] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
-    valid_ids = set(kb.ids)
 
-    def add_gap(source: str, description: str, paper_ids: list[str]) -> None:
-        paper_ids = sorted({pid for pid in paper_ids if pid in valid_ids})
-        description = description.strip()
-        key = (source, description.casefold(), tuple(paper_ids))
+    def add_gap(
+        source: str,
+        description: str,
+        paper_ids: list[str] | None = None,
+    ) -> None:
+        """Add a gap once, using a stable key to avoid duplicates."""
+        ids = sorted(set(paper_ids or []))
+        key = (
+            source,
+            " ".join(description.lower().split()),
+            tuple(ids),
+        )
 
-        if not description or key in seen:
+        if key in seen or len(gaps) >= max_gaps:
             return
 
         seen.add(key)
-        gaps.append(Gap(
-            id=f"G{len(gaps) + 1}",
-            source=source,
-            description=description,
-            paper_ids=paper_ids,
-        ))
+        gaps.append(
+            Gap(
+                id=f"G{len(gaps) + 1}",
+                source=source,
+                description=description.strip(),
+                paper_ids=ids,
+            )
+        )
 
-    # Merge KB reviews with the current run's reviews.
-    # Explicitly supplied reviews take precedence.
-    review_by_id = {
-        pid: review
-        for pid in kb.ids
-        if (review := kb.get_review(pid)) is not None
-    }
-    review_by_id.update({
-        review.paper_id: review
+    # ---------------------------------------------------------
+    # 1. Future work and limitations from paper reviews
+    # ---------------------------------------------------------
+    valid_reviews = [
+        review
         for review in reviews
-        if review.paper_id in valid_ids
-    })
-    all_reviews = list(review_by_id.values())
+        if getattr(review, "paper_id", None)
+    ]
 
-    # 1. Explicit future work.
-    for review in all_reviews:
-        for item in review.future_work:
-            add_gap(
-                "future_work",
-                f"Unaddressed future work: {item.strip()}",
-                [review.paper_id],
-            )
+    for review in valid_reviews:
+        paper_id = review.paper_id
+        title = getattr(review, "title", "") or paper_id
 
-    # 2. Conflicts already identified by Module B.
-    for item in conflict:
-        if not item.paper_ids:
-            continue
+        future_work = getattr(review, "future_work", []) or []
+        limitations = getattr(review, "cons", []) or []
 
-        if item.type == "finding":
-            description = (
-                f"Conflicting findings: {item.summary}. "
-                f"Evidence: {item.evidence_text}"
-            )
-        else:
-            description = (
-                f"Reviewer-identified issue: {item.summary}. "
-                f"Evidence: {item.evidence_text}"
-            )
-
-        add_gap("conflict", description, item.paper_ids)
-
-    # 3. Build paper coverage from graph edges.
-    # Graph nodes use types and edge kinds defined in interface.py.
-    graph_coverage: dict[str, set[str]] = defaultdict(set)
-
-    edge_to_type = {
-        "has_concept": "concept",
-        "has_method": "method",
-        "has_dataset": "dataset",
-        "has_metric": "metric",
-    }
-
-    for paper_id in kb.ids:
-        if paper_id not in kb.graph:
-            continue
-
-        for _, target, attrs in kb.graph.out_edges(
-            paper_id, data=True
-        ):
-            kind = attrs.get("kind")
-            category = edge_to_type.get(kind)
-
-            if category and target in kb.graph:
-                graph_coverage[target].add(paper_id)
-
-    # 4. Sparse regions: graph concepts supported by only one paper.
-    for node, paper_ids in sorted(graph_coverage.items()):
-        if len(paper_ids) != 1:
-            continue
-
-        attrs = kb.graph.nodes[node]
-        category = attrs.get("type", "concept")
-        name = attrs.get("name", node)
-
-        add_gap(
-            "sparse_region",
-            (
-                f"The {category} '{name}' is connected to only one "
-                f"paper in the available knowledge graph. Its role "
-                f"in the research topic '{request.topic}' may warrant "
-                f"further investigation."
-            ),
-            list(paper_ids),
-        )
-
-    # 5. Missing combinations: methods with datasets or metrics.
-    # Use reviewed co-occurrence rather than assuming graph edges
-    # establish that a method and dataset were used together.
-    category_papers: dict[str, dict[str, set[str]]] = {
-        "method": defaultdict(set),
-        "dataset": defaultdict(set),
-        "metric": defaultdict(set),
-    }
-    observed_pairs: dict[str, set[tuple[str, str]]] = {
-        "method_dataset": set(),
-        "method_metric": set(),
-    }
-
-    for review in all_reviews:
-        methods = {
-            value.strip().casefold()
-            for value in review.methods if value.strip()
-        }
-        datasets = {
-            value.strip().casefold()
-            for value in review.datasets if value.strip()
-        }
-        metrics = {
-            value.strip().casefold()
-            for value in review.metrics if value.strip()
-        }
-
-        for value in methods:
-            category_papers["method"][value].add(review.paper_id)
-        for value in datasets:
-            category_papers["dataset"][value].add(review.paper_id)
-        for value in metrics:
-            category_papers["metric"][value].add(review.paper_id)
-
-        observed_pairs["method_dataset"].update(
-            (method, dataset)
-            for method in methods
-            for dataset in datasets
-        )
-        observed_pairs["method_metric"].update(
-            (method, metric)
-            for method in methods
-            for metric in metrics
-        )
-
-    for target_type in ("dataset", "metric"):
-        pair_type = f"method_{target_type}"
-        target_label = target_type
-
-        methods = category_papers["method"]
-        targets = category_papers[target_type]
-
-        for method, method_papers in sorted(methods.items()):
-            # Avoid suggesting combinations based on isolated mentions.
-            if len(method_papers) < 2:
+        # Future work is explicitly represented in the Gap schema.
+        for item in future_work:
+            if not isinstance(item, str):
                 continue
 
-            for target, target_papers in sorted(targets.items()):
-                if len(target_papers) < 2:
-                    continue
+            item = item.strip()
+            if not item or item.lower() in {
+                "not stated",
+                "none",
+                "n/a",
+                "unknown",
+            }:
+                continue
 
-                if (method, target) in observed_pairs[pair_type]:
-                    continue
+            add_gap(
+                source="future_work",
+                description=(
+                    f"Future-work opportunity identified in {paper_id} "
+                    f"({title}): {item}"
+                ),
+                paper_ids=[paper_id],
+            )
 
-                supporting_ids = sorted(method_papers | target_papers)
+        # The shared Gap schema has no separate "limitation" source,
+        # so limitations are represented as future-work opportunities.
+        for item in limitations:
+            if not isinstance(item, str):
+                continue
 
-                add_gap(
-                    "missing_combination",
-                    (
-                        f"The method '{method}' and {target_label} "
-                        f"'{target}' appear independently in the "
-                        f"reviewed corpus but never co-occur in a "
-                        f"review. Investigate whether evaluating this "
-                        f"combination would address a meaningful "
-                        f"question about '{request.topic}'. This is "
-                        f"a corpus-level observation, not proof of "
-                        f"global novelty."
-                    ),
-                    supporting_ids,
+            item = item.strip()
+            if not item or item.lower() in {
+                "not stated",
+                "none",
+                "n/a",
+                "unknown",
+            }:
+                continue
+
+            add_gap(
+                source="future_work",
+                description=(
+                    f"Potential limitation to investigate in {paper_id} "
+                    f"({title}): {item}"
+                ),
+                paper_ids=[paper_id],
+            )
+
+    # ---------------------------------------------------------
+    # 2. Contradictory findings and reviewer disagreements
+    # ---------------------------------------------------------
+    for conflict in conflicts:
+        paper_ids = getattr(conflict, "paper_ids", []) or []
+        summary = getattr(conflict, "summary", "") or ""
+        evidence = getattr(conflict, "evidence_text", "") or ""
+        conflict_type = getattr(conflict, "type", "finding")
+
+        description = (
+            f"Research gap arising from {conflict_type} conflict "
+            f"{getattr(conflict, 'id', 'unknown')}: {summary}"
+        )
+
+        if evidence.strip():
+            description += f" Evidence: {evidence.strip()}"
+
+        add_gap(
+            source="conflict",
+            description=description,
+            paper_ids=paper_ids,
+        )
+
+    # ---------------------------------------------------------
+    # 3. Missing concept/method and method/dataset combinations
+    # ---------------------------------------------------------
+    concept_papers: dict[str, set[str]] = defaultdict(set)
+    method_papers: dict[str, set[str]] = defaultdict(set)
+    dataset_papers: dict[str, set[str]] = defaultdict(set)
+
+    concept_method_pairs: set[tuple[str, str]] = set()
+    method_dataset_pairs: set[tuple[str, str]] = set()
+
+    def clean_items(values: Any) -> list[str]:
+        """Normalize strings and remove empty or unspecified entries."""
+        if not values:
+            return []
+
+        if isinstance(values, str):
+            values = [values]
+
+        result = []
+        for value in values:
+            if not isinstance(value, str):
+                continue
+
+            value = " ".join(value.strip().split())
+            if value and value.lower() not in {
+                "not stated",
+                "none",
+                "n/a",
+                "unknown",
+            }:
+                result.append(value)
+
+        return sorted(set(result), key=str.casefold)
+
+    for review in valid_reviews:
+        paper_id = review.paper_id
+
+        concepts = clean_items(getattr(review, "concepts", []))
+        methods = clean_items(getattr(review, "methods", []))
+        datasets = clean_items(getattr(review, "datasets", []))
+
+        for concept in concepts:
+            concept_papers[concept].add(paper_id)
+
+        for method in methods:
+            method_papers[method].add(paper_id)
+
+        for dataset in datasets:
+            dataset_papers[dataset].add(paper_id)
+
+        for concept in concepts:
+            for method in methods:
+                concept_method_pairs.add((concept, method))
+
+        for method in methods:
+            for dataset in datasets:
+                method_dataset_pairs.add((method, dataset))
+
+    all_paper_ids = {
+        review.paper_id for review in valid_reviews
+    }
+
+    # Only report pairs among terms observed in the reviewed literature.
+    concepts = sorted(concept_papers, key=str.casefold)
+    methods = sorted(method_papers, key=str.casefold)
+    datasets = sorted(dataset_papers, key=str.casefold)
+
+    for concept in concepts:
+        for method in methods:
+            if (concept, method) in concept_method_pairs:
+                continue
+
+            relevant_ids = sorted(
+                concept_papers[concept] | method_papers[method]
+            )
+
+            add_gap(
+                source="missing_combination",
+                description=(
+                    f"No reviewed paper combines concept '{concept}' "
+                    f"with method '{method}'. Investigate whether "
+                    f"combining them could address the research topic: "
+                    f"{request.topic}"
+                ),
+                paper_ids=relevant_ids,
+            )
+
+            if len(gaps) >= max_gaps:
+                return gaps
+
+    for method in methods:
+        for dataset in datasets:
+            if (method, dataset) in method_dataset_pairs:
+                continue
+
+            relevant_ids = sorted(
+                method_papers[method] | dataset_papers[dataset]
+            )
+
+            add_gap(
+                source="missing_combination",
+                description=(
+                    f"No reviewed paper combines method '{method}' "
+                    f"with dataset '{dataset}'. Evaluate whether this "
+                    f"combination is appropriate for the research topic: "
+                    f"{request.topic}"
+                ),
+                paper_ids=relevant_ids,
+            )
+
+            if len(gaps) >= max_gaps:
+                return gaps
+
+    # ---------------------------------------------------------
+    # 4. Sparse regions in the similarity graph near the topic
+    # ---------------------------------------------------------
+    graph = getattr(kb, "graph", None)
+
+    if graph is not None and hasattr(graph, "nodes"):
+        # Restrict analysis to paper nodes.
+        paper_nodes = {
+            node
+            for node, attrs in graph.nodes(data=True)
+            if attrs.get("type") == "paper"
+        }
+
+        # Use the knowledge base's topic vector when available.
+        topic_vector = getattr(kb, "topic_vector", None)
+
+        if callable(topic_vector):
+            try:
+                topic_vector = topic_vector()
+            except Exception:
+                topic_vector = None
+
+        # Determine which papers are near the topic.
+        # If no usable topic vector is available, retain the paper
+        # nodes in the graph rather than inventing topic similarities.
+        near_topic: set[str] = set()
+
+        if topic_vector is not None and hasattr(kb, "closest_to_text"):
+            # This method expects text, so do not pass a vector to it.
+            # Use the request topic for the nearest-paper query instead.
+            try:
+                nearest = kb.closest_to_text(
+                    request.topic,
+                    k=max(1, len(paper_nodes)),
                 )
 
+                for item in nearest or []:
+                    if isinstance(item, str):
+                        near_topic.add(item)
+                    elif isinstance(item, (tuple, list)) and item:
+                        near_topic.add(str(item[0]))
+                    elif hasattr(item, "paper_id"):
+                        near_topic.add(str(item.paper_id))
+
+            except (TypeError, ValueError, AttributeError):
+                near_topic = set()
+
+        # If topic-neighbor lookup is unavailable, skip sparse-region
+        # discovery rather than incorrectly claiming papers are near topic.
+        if near_topic:
+            near_topic &= paper_nodes
+
+            # Similarity edges indicate semantic closeness. Citation
+            # edges are not treated as semantic similarity.
+            similarity_graph = graph.subgraph(near_topic).copy()
+
+            for u, v, attrs in graph.edges(data=True):
+                if u not in near_topic or v not in near_topic:
+                    continue
+
+                if attrs.get("kind") != "similar":
+                    continue
+
+                weight = attrs.get("weight")
+
+                try:
+                    weight = float(weight)
+                except (TypeError, ValueError):
+                    continue
+
+                if weight >= sparse_similarity_threshold:
+                    similarity_graph.add_edge(u, v, weight=weight)
+
+            # Low-degree papers in the topic neighborhood are candidates
+            # for sparse regions. Group connected candidates to avoid
+            # emitting one gap for every isolated paper.
+            sparse_nodes = {
+                node
+                for node in near_topic
+                if similarity_graph.degree(node) < min_sparse_region_size
+            }
+
+            sparse_subgraph = similarity_graph.subgraph(sparse_nodes)
+
+            for component in __import__("networkx").connected_components(
+                sparse_subgraph
+            ):
+                component_ids = sorted(str(node) for node in component)
+
+                if not component_ids:
+                    continue
+
+                add_gap(
+                    source="sparse_region",
+                    description=(
+                        f"Potentially sparse semantic region near the "
+                        f"research topic '{request.topic}', containing "
+                        f"{len(component_ids)} paper(s): "
+                        f"{', '.join(component_ids)}. Investigate whether "
+                        f"this region represents an underexplored direction."
+                    ),
+                    paper_ids=component_ids,
+                )
+
+                if len(gaps) >= max_gaps:
+                    return gaps
+
     return gaps
+
 
 def hypothesise(
     kb: KBHandle,
