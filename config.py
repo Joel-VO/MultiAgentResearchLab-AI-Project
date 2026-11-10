@@ -13,3 +13,7 @@ REF_SEEDS = 3                        # experiment weight = min(1, n_seeds / REF_
 CI_WIDTH_MAX = 0.4                   # preliminary if the 90% CI is wider than this
 MIN_WEIGHT = 3.0                     # ... or if total evidence weight is below this
 C_REF = 1000                         # citation count that gives full citation reliability
+
+# ---- orchestration (module_A_tooling/orchestrator.py)
+MAX_ROUNDS = 3                       # experiment -> review rounds before the report
+DEFAULT_LICENSES = ["mit", "apache-2.0", "cc-by-4.0", "cc-by-sa-4.0"]  # CLI default for Resources
