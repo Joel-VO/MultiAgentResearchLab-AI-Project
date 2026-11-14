@@ -130,7 +130,7 @@ DEDUPE_YEAR_TOLERANCE = 1          # preprint vs published version can differ by
 DEDUPE_MIN_TITLE_CHARS = 15        # PLACEHOLDER: shorter normalised titles ("Introduction") are too generic to match on
 
 # ------------------------------------------------------------------ B0: references
-MAX_REFERENCES_PER_PAPER = 200     # PLACEHOLDER: cap; a paper that hits it is flagged as partial
+MAX_REFERENCES_PER_PAPER = 200 #for small corpus set to 5     # PLACEHOLDER: cap; a paper that hits it is flagged as partial
 
 # ------------------------------------------------------------------ B1: discovery (v2.2 spec)
 SeedSimMode = Literal["centroid", "max", "top_k_mean"]
@@ -141,7 +141,7 @@ GroupSelfTest = Literal["error", "warn"]
 
 # Defaults used when the request carries no budget. They MIRROR schemas.Budget; the request wins.
 # max_papers None = "not chosen by the user": B1 then uses  PAPERS_BASE + PAPERS_PER_SEED * number_of_seeds.
-B1_DEFAULT_BUDGET = {"max_papers": None, "max_depth": 2, "fanout_per_node": 20}
+B1_DEFAULT_BUDGET = {"max_papers": None, "max_depth": 2, "fanout_per_node": 20} 
 PAPERS_BASE = 40                   # PLACEHOLDER: papers of the formula that do not depend on the seeds (also the floor)
 PAPERS_PER_SEED = 50               # PLACEHOLDER: extra papers for every seed (linear on purpose: later steps cost per paper)
 
@@ -168,7 +168,7 @@ ABS_MAX_DEPTH = 4                  # PLACEHOLDER: hard depth cap, even for HIGH_
 MAX_EXPANSIONS_FACTOR = 1.5        # PLACEHOLDER: cap on expansions = ceil(factor * max_papers). Each accepted paper is read at most once,
                                    # so this is only a safety valve and rarely the reason a run stops.
 PHASE0_QUOTA = 20                  # PLACEHOLDER: upper limit of guaranteed children per seed (the real Q is derived from the budget)
-GUARANTEE_FRACTION = 0.30          # PLACEHOLDER: share of max_papers the guaranteed children may use
+GUARANTEE_FRACTION = 0.30         # PLACEHOLDER: share of max_papers the guaranteed children may use     
 
 # exploration (Phase 2). 0 = off: the first run is the baseline.
 EXPLORE_FRACTION = 0.0             # share of max_papers reserved for exploration papers (0 .. 0.5)
@@ -229,8 +229,23 @@ STEP_SETTINGS: dict[str, list[str]] = {
                      "GROUP_MIN_THRESHOLD", "GROUP_SCORE_MODE", "GROUP_INCLUDE_TOPIC", "GROUP_TOPIC_THRESHOLD",
                      "GROUP_HIGH_SIM", "GROUP_EXPLORE_MIN_ANCHOR", "GROUP_SELF_TEST",
                      "EMBEDDING_MODEL", "EMBEDDING_REVISION", "EMBEDDING_INPUT", "EMBEDDING_MAX_SEQ_LENGTH"],
-    "b2b_review": ["B2B_MIN_ROUTED_CHARS", "B2B_MAX_INPUT_CHARS"],
+    
+    "b2b_review": [
+        "B2B_MIN_ROUTED_CHARS",
+        "B2B_MAX_INPUT_CHARS",
+        "MAX_CONCEPTS",
+    ],
+
+    "b2a_review": [
+        "B2A_PROMPT_VERSION",
+        "B2A_RETRY_FAIL_FRACTION",
+        "MAX_ABSTRACT_CHARS",
+        "MAX_CONCEPTS",
+    ],
+
+    "b2_merge": [],
 }
+
 
 
 def config_hash(step: str) -> str:
