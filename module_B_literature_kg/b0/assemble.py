@@ -9,7 +9,7 @@ Files written by the earlier steps (ids.json, embeddings.npy, topic.npy, citatio
 checked here but not rewritten.
 
 Quality gates (ALL must pass, otherwise the step fails and "done" is NOT written)
-    steps_intact     steps 1-5 are "done" and their output files still match the recorded hashes
+    steps_intact     the upstream steps (seeds, references, b1_discovery, fulltext, dedupe, embed) are "done" and their output files still match the recorded hashes
     seed_resolved    at least one seed paper was resolved
     paper_ids        ids are P1..Pn without gaps; every paper has a title
     alias_map        every original record maps to a final id
@@ -39,7 +39,8 @@ from .seeds import SEEDS_FILE
 PAPERS_FILE = RUN_FILES["papers"]
 RECORDS_FILE = RUN_FILES["paper_records"]
 REPORT_FILE = RUN_FILES["b0_report"]
-UPSTREAM_STEPS = ["b0_seeds", "b0_references", "b0_fulltext", "b0_dedupe", "b0_embed"]
+DISCOVERY_FILE = RUN_FILES["discovery"]
+UPSTREAM_STEPS = ["b0_seeds", "b0_references", "b1_discovery", "b0_fulltext", "b0_dedupe", "b0_embed"]
 REPORT_VERSION = 1
 
 # PaperMeta (interface.py) field -> accepted Python types. Kept here so the check works even where
@@ -62,12 +63,13 @@ def _num(pid: str) -> int:
 
 def load_run(root: Path) -> dict:
     """Read every file the gates and the builders need. Raises MissingInputError if one is absent."""
-    need = [SEEDS_FILE, REFERENCES_FILE, CANONICAL_FILE, ALIAS_FILE, LOG_FILE, EDGES_FILE, IDS_FILE,
+    need = [SEEDS_FILE, REFERENCES_FILE, DISCOVERY_FILE, CANONICAL_FILE, ALIAS_FILE, LOG_FILE, EDGES_FILE, IDS_FILE,
             EMBEDDINGS_FILE, TOPIC_FILE, STATUS_FILE, f"{FULLTEXT_DIR}/{INDEX_FILE}"]
     missing = [n for n in need if not (root / n).exists()]
     if missing:
         raise MissingInputError("B0 is incomplete, these files are missing: " + ", ".join(missing))
     return {"seeds": read_json(root / SEEDS_FILE), "references": read_json(root / REFERENCES_FILE),
+            "discovery": read_json(root / DISCOVERY_FILE),
             "canonical": read_json(root / CANONICAL_FILE)["papers"], "alias": read_json(root / ALIAS_FILE),
             "log": read_json(root / LOG_FILE), "edges": read_json(root / EDGES_FILE),
             "ids": read_json(root / IDS_FILE), "matrix": np.load(root / EMBEDDINGS_FILE),
@@ -136,6 +138,11 @@ def build_records(root: Path, run: dict) -> dict[str, dict]:
                                "source": entry["source"], "text_file": entry["text_file"],
                                "warnings": report.get("warnings", []), "attempts": report.get("attempts", []),
                                "provenance": report.get("provenance")}
+        for key in [c["key"]] + list(c["aliases"]):                 # B1 scores: why this paper is in the KB
+            score = run["discovery"]["scores"].get(key)
+            if score is not None:
+                rec["discovery"] = {"raw_key": key, **score}
+                break
         rec["embedding"] = run["emb_status"].get(pid)
         records[pid] = rec
     return records
@@ -286,7 +293,12 @@ def build_report(manifest: Manifest, run: dict, papers: dict, gates: list[dict])
               "n_merged_pairs": run["log"]["counts"]["merged"],
               "n_possible_duplicates": run["log"]["counts"]["candidate"],
               "n_seeds_partial_references": len(partial), "embedding_dim": int(run["matrix"].shape[1])}
-    return {"version": REPORT_VERSION, "counts": counts, "steps": steps,
+    meta = run["discovery"]["meta"]
+    discovery = {"stop_reason": meta["stop_reason"], "expansions": meta["expansions"], "n_judged": meta["n_judged"],
+                 "n_accepted": meta["n_accepted"], "n_rejected": meta["n_rejected"], "accepted_by": meta["accepted_by"],
+                 "seed_coverage": meta["seed_coverage"], "plan": meta["plan"],
+                 "mode": meta.get("mode", "classic"), "groups": meta.get("groups")}
+    return {"version": REPORT_VERSION, "counts": counts, "steps": steps, "discovery": discovery,
             "needs_confirmation": run["seeds"].get("needs_confirmation", []),
             "warnings": warnings, "gates": gates, "all_gates_passed": all(g["passed"] for g in gates)}
 
@@ -296,7 +308,7 @@ def build_report(manifest: Manifest, run: dict, papers: dict, gates: list[dict])
 def run_assemble_step(manifest: Manifest) -> StepResult:
     """Step 6 under the manifest. Fails (no 'done') if any quality gate fails."""
     root = manifest.root
-    inputs = [SEEDS_FILE, REFERENCES_FILE, FULLTEXT_DIR, CANONICAL_FILE, ALIAS_FILE, LOG_FILE, EDGES_FILE,
+    inputs = [SEEDS_FILE, REFERENCES_FILE, DISCOVERY_FILE, FULLTEXT_DIR, CANONICAL_FILE, ALIAS_FILE, LOG_FILE, EDGES_FILE,
               IDS_FILE, EMBEDDINGS_FILE, TOPIC_FILE, STATUS_FILE]
 
     def work(staging: Path) -> dict:

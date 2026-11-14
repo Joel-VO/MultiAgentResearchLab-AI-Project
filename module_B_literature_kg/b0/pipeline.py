@@ -8,8 +8,9 @@ Order (each step is skipped when nothing it depends on changed, so re-running is
 crashed run):
     1 b0_seeds       find the seed papers
     2 b0_references  fetch what the seeds cite
+    B1 b1_discovery  score the papers, follow citations best-first, keep the relevant ones (discovery.json)
     3 b0_fulltext    full text of the seeds (ar5iv, then PDF), checked
-    4 b0_dedupe      merge duplicates, give ids P1..Pn, remap citation edges
+    4 b0_dedupe      merge duplicates, give ids P1..Pn, remap citation edges (reads discovery.json)
     5 b0_embed       vectors for the papers and the topic
     6 b0_assemble    quality gates, then papers.json, paper_records.json, b0_report.json
 
@@ -30,6 +31,7 @@ from typing import Any, Optional
 
 from module_A_tooling.config import DEFAULT_RUN_ID, RUN_FILES, run_dir
 from .assemble import PAPERS_FILE, RECORDS_FILE, REPORT_FILE, run_assemble_step
+from .b1_discovery import B1Settings, normalise_budget, run_b1_step
 from .clients import ArxivClient, RawReplyStore, S2Client
 from .dedupe import run_dedupe_step
 from .embed import Embedder, run_embed_step
@@ -40,7 +42,7 @@ from .seeds import run_seeds_step
 
 log = logging.getLogger("b0")
 
-STEP_ORDER = ["b0_seeds", "b0_references", "b0_fulltext", "b0_dedupe", "b0_embed", "b0_assemble"]
+STEP_ORDER = ["b0_seeds", "b0_references", "b1_discovery", "b0_fulltext", "b0_dedupe", "b0_embed", "b0_assemble"]
 
 
 class B0Error(RuntimeError):
@@ -89,23 +91,34 @@ def read_request(request: Any) -> tuple[str, list[str]]:
     return topic, list(dict.fromkeys(seeds))                       # same text twice -> once
 
 
+def read_budget(request: Any) -> dict:
+    """{max_papers, max_depth, fanout_per_node} from request.budget (a schemas.Budget, a dict, or missing).
+    Missing values fall back to config.B1_DEFAULT_BUDGET. max_papers None means "grow with the seeds"
+    (decided in B1, once the resolved seeds are known)."""
+    budget = request.get("budget") if isinstance(request, dict) else getattr(request, "budget", None)
+    return normalise_budget(budget)
+
+
 # --------------------------------------------------------------------------- the run
 
 def run_b0(request: Any, run_id: str = DEFAULT_RUN_ID, *, root: Optional[Path] = None,
            s2: Optional[S2Client] = None, arxiv: Optional[ArxivClient] = None,
            fetcher: Optional[FulltextFetcher] = None, embedder: Optional[Embedder] = None,
            thresholds: Optional[Thresholds] = None, force: bool = False,
-           stop_after: Optional[str] = None) -> B0Result:
+           stop_after: Optional[str] = None, b1_settings: Optional[B1Settings] = None,
+           as_of_year: Optional[int] = None) -> B0Result:
     """Run B0 for one request.
 
     root         folder of the run (default runs/<run_id>/). Tests pass a temporary folder.
     s2, arxiv, fetcher, embedder   the services. Left out, the real ones are created (internet, BGE-M3).
     force        ignore "nothing changed" and redo every step.
     stop_after   stop after this step (e.g. "b0_references") to look at partial results.
+    b1_settings  override the B1 numbers (default: config.py).  as_of_year: year used by B1's citation score (default: this year).
     """
     if stop_after is not None and stop_after not in STEP_ORDER:
         raise ValueError(f"stop_after must be one of {STEP_ORDER}")
     topic, seeds = read_request(request)
+    budget = read_budget(request)
     manifest = Manifest(run_id, root=root)
     stale = manifest.validate_prior_state()                         # outputs changed behind our back -> redo
     for step, why in stale.items():
@@ -113,7 +126,7 @@ def run_b0(request: Any, run_id: str = DEFAULT_RUN_ID, *, root: Optional[Path] =
     if force:
         for step in STEP_ORDER:
             manifest.set(step, {"status": "stale", "stale_reason": "forced"})
-    atomic_write_json(manifest.root / RUN_FILES["request"], {"topic": topic, "seed_papers": seeds})
+    atomic_write_json(manifest.root / RUN_FILES["request"], {"topic": topic, "seed_papers": seeds, "budget": budget})
 
     raw = RawReplyStore(manifest.root / RUN_FILES["raw_replies"])
     s2 = s2 or S2Client(raw=raw)
@@ -123,6 +136,8 @@ def run_b0(request: Any, run_id: str = DEFAULT_RUN_ID, *, root: Optional[Path] =
 
     runners = {"b0_seeds": lambda: run_seeds_step(manifest, seeds, s2, arxiv),
                "b0_references": lambda: run_references_step(manifest, s2),
+               "b1_discovery": lambda: run_b1_step(manifest, topic, s2, embedder, budget,
+                                                   settings=b1_settings, as_of_year=as_of_year),
                "b0_fulltext": lambda: run_fulltext_step(manifest, fetcher, thresholds),
                "b0_dedupe": lambda: run_dedupe_step(manifest),
                "b0_embed": lambda: run_embed_step(manifest, topic, embedder),
@@ -157,6 +172,12 @@ def format_summary(result: B0Result) -> str:
                   f"  embedded: {c['n_embedded']} (vector size {c['embedding_dim']}), "
                   f"seeds with full text: {c['n_with_full_text']}",
                   f"  duplicates merged: {c['n_merged_pairs']}, possible duplicates flagged: {c['n_possible_duplicates']}"]
+    d = result.report.get("discovery")
+    if d:
+        lines += ["", f"  discovery mode: {d.get('mode', 'classic')}, accepted {d['n_accepted']}, stop reason: {d['stop_reason']}"]
+        for g in d.get("groups") or []:
+            lines.append(f"    group {g['id']}: {g['size']} seed(s), threshold {g['threshold']:.2f}, "
+                         f"{g['best_match_for']} paper(s) matched it best")
     if result.report.get("needs_confirmation"):
         lines += ["", "  PLEASE CONFIRM these title matches: " + "; ".join(result.report["needs_confirmation"])]
     if result.report.get("warnings"):
@@ -174,6 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--run-id", default=DEFAULT_RUN_ID)
     ap.add_argument("--force", action="store_true", help="redo every step even if nothing changed")
     ap.add_argument("--stop-after", choices=STEP_ORDER, help="stop after this step")
+    ap.add_argument("--discovery-mode", choices=["classic", "groups"],
+                    help="B1 acceptance rule (default: config.DISCOVERY_MODE). Use a different --run-id per mode to compare them")
     return ap
 
 
@@ -184,8 +207,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         seeds += [ln.strip() for ln in Path(args.seeds_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        b1_settings = B1Settings(mode=args.discovery_mode) if args.discovery_mode else None
         result = run_b0({"topic": args.topic, "seed_papers": seeds}, args.run_id,
-                        force=args.force, stop_after=args.stop_after)
+                        force=args.force, stop_after=args.stop_after, b1_settings=b1_settings)
     except (B0Error, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

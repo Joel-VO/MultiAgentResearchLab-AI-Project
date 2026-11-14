@@ -22,6 +22,8 @@ Nothing is destroyed
     * Undo a merge: put the pair under "undo" in runs/<id>/dedupe_overrides.json and re-run. The same
       file can promote a candidate with "merge". (This file is optional and written by hand.)
 
+Input:   seeds.json and discovery.json (B1's accepted papers + links; it has the same shape as references.json,
+         so every `refs_doc` below is the discovery document).
 Outputs: canonical_papers.json, alias_map.json, dedupe_log.json, citation_edges.json
 """
 from __future__ import annotations
@@ -35,7 +37,6 @@ from typing import Iterable, Optional
 from module_A_tooling.config import (DEDUPE_MIN_TITLE_CHARS, DEDUPE_TITLE_SIM, DEDUPE_YEAR_TOLERANCE, RUN_FILES)
 from .clients import normalize_title
 from .manifest import (Manifest, MissingInputError, StepResult, atomic_write_json, read_json, run_step)
-from .references import REFERENCES_FILE
 from .seeds import SEEDS_FILE
 
 CANONICAL_FILE = RUN_FILES["canonical"]
@@ -43,6 +44,7 @@ ALIAS_FILE = RUN_FILES["alias_map"]
 LOG_FILE = RUN_FILES["dedupe_log"]
 EDGES_FILE = RUN_FILES["citation_edges"]
 OVERRIDES_FILE = RUN_FILES["dedupe_overrides"]
+DISCOVERY_FILE = RUN_FILES["discovery"]      # B1 output: same shape as references.json (stubs + edges)
 DEDUPE_VERSION = 1
 ID_FIELDS = ("doi", "arxiv_id", "s2_id")
 SCALAR_FIELDS = ("title", "abstract", "year", "venue", "doi", "arxiv_id", "s2_id", "open_access_pdf_url")
@@ -318,12 +320,13 @@ def validate_dedupe_output(staging: Path, expected_keys: set[str], seed_keys: se
 
 
 def run_dedupe_step(manifest: Manifest) -> StepResult:
-    """Step 4 under the manifest. Reads seeds.json and references.json (and dedupe_overrides.json if present)."""
+    """Step 4 under the manifest. Reads seeds.json and discovery.json (B1's output, the same shape as
+    references.json) and dedupe_overrides.json if present."""
     root = manifest.root
-    seeds_doc, refs_doc = read_json(root / SEEDS_FILE), read_json(root / REFERENCES_FILE)
+    seeds_doc, refs_doc = read_json(root / SEEDS_FILE), read_json(root / DISCOVERY_FILE)
     if seeds_doc is None or refs_doc is None:
-        raise MissingInputError(f"{SEEDS_FILE} and {REFERENCES_FILE} are needed: run steps 1 and 2 first")
-    inputs = [SEEDS_FILE, REFERENCES_FILE] + ([OVERRIDES_FILE] if (root / OVERRIDES_FILE).exists() else [])
+        raise MissingInputError(f"{SEEDS_FILE} and {DISCOVERY_FILE} are needed: run steps b0_seeds, b0_references and b1_discovery first")
+    inputs = [SEEDS_FILE, DISCOVERY_FILE] + ([OVERRIDES_FILE] if (root / OVERRIDES_FILE).exists() else [])
     overrides = read_json(root / OVERRIDES_FILE, {}) if len(inputs) == 3 else {}
     records = collect_records(seeds_doc, refs_doc)
     expected_keys = {r["key"] for r in records}

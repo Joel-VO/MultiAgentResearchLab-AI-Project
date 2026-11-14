@@ -54,7 +54,7 @@ ACTION_TYPES: tuple[str, ...] = get_args(ActionType)
 # ---------------------------------------------------------------- request (input to the graph)
 
 class Budget(BaseModel):
-    max_papers: int = 150
+    max_papers: int | None = None  # None = B1 decides: PAPERS_BASE + PAPERS_PER_SEED * number of seeds
     max_depth: int = 2
     fanout_per_node: int = 20
 

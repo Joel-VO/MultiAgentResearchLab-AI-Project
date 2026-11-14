@@ -72,7 +72,7 @@ One package per module. Directory names follow `DESIGN.md` (module letter plus m
 | Module | Directory | Contents |
 |---|---|---|
 | A | `module_a_tooling/` | shared types, `LabState`, ledger, LLM client, sandbox, dataset gate, citation check, report |
-| B | `module_b_literature_kb/` | citation search, KB graph, paper reviews, conflict detection |
+| B | `module_B_literature_kg_literature_kb/` | citation search, KB graph, paper reviews, conflict detection |
 | C | `module_c_hypothesis/` | gap mining, multi-agent discussion, scoring |
 | D | `module_d_workflow_csp_rl/` | `tracker.py` (D.1), `csp.py` (D.2), `rl_controller.py` and `labsim.py` (D.3) |
 | E | `module_e_experimenter/` | experiment design, runs, simulator, evaluation scenarios |
