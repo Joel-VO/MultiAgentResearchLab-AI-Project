@@ -97,7 +97,7 @@ CACHE_TTL_SECONDS: dict[str, float | None] = {
 # ------------------------------------------------------------------ B0: embeddings
 EMBEDDING_MODEL = "BAAI/bge-m3"    # decided: one model for the topic and all papers
 EMBEDDING_REVISION = "main"        # PLACEHOLDER: pin to a commit hash once the model is downloaded
-EMBEDDING_DEVICE = "cpu"
+EMBEDDING_DEVICE = "cuda" if os.environ.get("CUDA_VISIBLE_DEVICES") else "cpu"  # "cuda" or "cpu"
 EMBEDDING_BATCH_SIZE = 8           # small batches on CPU
 EMBEDDING_INPUT = "title+abstract"
 VECTOR_NORM_TOLERANCE = 1e-3       # a vector counts as "unit length" if its length is within this of 1.0
@@ -130,7 +130,7 @@ DEDUPE_YEAR_TOLERANCE = 1          # preprint vs published version can differ by
 DEDUPE_MIN_TITLE_CHARS = 15        # PLACEHOLDER: shorter normalised titles ("Introduction") are too generic to match on
 
 # ------------------------------------------------------------------ B0: references
-MAX_REFERENCES_PER_PAPER = 200 #for small corpus set to 5     # PLACEHOLDER: cap; a paper that hits it is flagged as partial
+MAX_REFERENCES_PER_PAPER = 10 #for small corpus set to 5     # PLACEHOLDER: cap; a paper that hits it is flagged as partial
 
 # ------------------------------------------------------------------ B1: discovery (v2.2 spec)
 SeedSimMode = Literal["centroid", "max", "top_k_mean"]
@@ -141,7 +141,7 @@ GroupSelfTest = Literal["error", "warn"]
 
 # Defaults used when the request carries no budget. They MIRROR schemas.Budget; the request wins.
 # max_papers None = "not chosen by the user": B1 then uses  PAPERS_BASE + PAPERS_PER_SEED * number_of_seeds.
-B1_DEFAULT_BUDGET = {"max_papers": None, "max_depth": 2, "fanout_per_node": 20} 
+B1_DEFAULT_BUDGET = {"max_papers": 10, "max_depth": 1, "fanout_per_node": 10} 
 PAPERS_BASE = 40                   # PLACEHOLDER: papers of the formula that do not depend on the seeds (also the floor)
 PAPERS_PER_SEED = 50               # PLACEHOLDER: extra papers for every seed (linear on purpose: later steps cost per paper)
 
@@ -168,7 +168,7 @@ ABS_MAX_DEPTH = 4                  # PLACEHOLDER: hard depth cap, even for HIGH_
 MAX_EXPANSIONS_FACTOR = 1.5        # PLACEHOLDER: cap on expansions = ceil(factor * max_papers). Each accepted paper is read at most once,
                                    # so this is only a safety valve and rarely the reason a run stops.
 PHASE0_QUOTA = 20                  # PLACEHOLDER: upper limit of guaranteed children per seed (the real Q is derived from the budget)
-GUARANTEE_FRACTION = 0.30         # PLACEHOLDER: share of max_papers the guaranteed children may use     
+GUARANTEE_FRACTION = 1.00         # PLACEHOLDER: share of max_papers the guaranteed children may use     
 
 # exploration (Phase 2). 0 = off: the first run is the baseline.
 EXPLORE_FRACTION = 0.0             # share of max_papers reserved for exploration papers (0 .. 0.5)
@@ -203,10 +203,49 @@ GROUP_SELF_TEST: GroupSelfTest = "error"
 
 
 
+# ------------------------------------------------------------------ A2: local LLM client and B2 settings
+# The LLM is hosted by YOU in a local server program (Ollama, vLLM, llama.cpp server, LM Studio). No API keys anywhere.
+LOCAL_LLM_URL = "http://localhost:11434/v1"   # Ollama default. vLLM: http://localhost:8000/v1, llama.cpp: http://localhost:8080/v1
+LLM_TIMEOUT_SECONDS = 600.0        # a local model can be slow; this is the wait for ONE answer
+LLM_MAX_ATTEMPTS = 3               # tries per question (timeout, busy server, unusable answer)
+CHARS_PER_TOKEN_ESTIMATE = 3.0     # to check that an input fits the context window; low on purpose (safe side)
+# nickname -> how to reach one model. PLACEHOLDER: replace "SET_ME" with the model name your server shows
+# (Ollama: `ollama list`). Two nicknames may point to the same model: they differ in answer and context sizes.
+#   max_tokens          longest answer allowed. Models that "think" before answering (printing <think>) need much more.
+#   context_tokens      the model's context window AS YOUR SERVER IS SET UP (it must be set in the server too:
+#                       Ollama num_ctx / OLLAMA_CONTEXT_LENGTH, vLLM --max-model-len, llama.cpp -c). Longer inputs are refused.
+#   structured_output   "json_schema" (server forces the answer to fit the form, best), "json_object" (valid JSON only)
+#                       or "none". If the server answers HTTP 400 about the format, use "json_object".
+#   temperature, seed   0 and 0: the same question gives the same answer. temperature None = do not send it.
+
+
+LLM_MODELS: dict[str, dict] = {
+    "local":      {"base_url": LOCAL_LLM_URL, "think": False, "model": "qwen3:8b", "temperature": 0.5, "seed": 0,
+                   "max_tokens": 2500, "context_tokens": 8192, "structured_output": "json_schema"},
+    "local_long": {"base_url": LOCAL_LLM_URL, "think": False, "model": "qwen3:8b", "temperature": 0.5, "seed": 0,
+                   "max_tokens": 3000, "context_tokens": 32768, "structured_output": "json_schema"},
+}
+
 B2B_PROMPT_VERSION = "1"
 B2B_MIN_ROUTED_CHARS = 1500        # below this a call gets the whole paper instead
 B2B_MAX_INPUT_CHARS = 40000        # per call. Use about 80000 for a 27B model
 REVIEW_MODEL_B2B = "local_long"    # skip if it already exists
+
+
+REVIEW_MODEL_B2A = "local"         # nickname from LLM_MODELS: abstract reviews (short inputs)
+REVIEW_MODEL_B2B = "local_long"    # nickname from LLM_MODELS: seed full-text reviews (long inputs, needs a big context)
+B2A_PROMPT_VERSION = "2"           # bump when the B2a prompt changes (part of the cache key)
+MAX_ABSTRACT_CHARS = 3000          # longer abstracts are cut
+MIN_QUOTE_WORDS = 5                # a supporting quote shorter than this is not evidence
+MAX_QUOTE_CHARS = 300
+MAX_CONCEPTS = 8
+B2A_RETRY_FAIL_FRACTION = 0.5      # if MORE than this share of claims fail the quote check, ask once more
+
+
+
+B4_MODEL = "local"            # must be a key of LLM_MODELS
+B4_PROMPT_VERSION = "1"
+B4_MAX_PAIRS = 50
 
 
 # ------------------------------------------------------------------ manifest: which settings belong to which step
@@ -244,6 +283,8 @@ STEP_SETTINGS: dict[str, list[str]] = {
     ],
 
     "b2_merge": [],
+    "b3_graph": [],
+    "b4_conflicts": ["B4_MODEL", "B4_PROMPT_VERSION", "B4_MAX_PAIRS"],
 }
 
 
@@ -256,37 +297,11 @@ def config_hash(step: str) -> str:
     blob = json.dumps(values, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
-# ------------------------------------------------------------------ A2: local LLM client and B2 settings
-# The LLM is hosted by YOU in a local server program (Ollama, vLLM, llama.cpp server, LM Studio). No API keys anywhere.
-LOCAL_LLM_URL = "http://localhost:11434/v1"   # Ollama default. vLLM: http://localhost:8000/v1, llama.cpp: http://localhost:8080/v1
-LLM_TIMEOUT_SECONDS = 600.0        # a local model can be slow; this is the wait for ONE answer
-LLM_MAX_ATTEMPTS = 3               # tries per question (timeout, busy server, unusable answer)
-CHARS_PER_TOKEN_ESTIMATE = 3.0     # to check that an input fits the context window; low on purpose (safe side)
-# nickname -> how to reach one model. PLACEHOLDER: replace "SET_ME" with the model name your server shows
-# (Ollama: `ollama list`). Two nicknames may point to the same model: they differ in answer and context sizes.
-#   max_tokens          longest answer allowed. Models that "think" before answering (printing <think>) need much more.
-#   context_tokens      the model's context window AS YOUR SERVER IS SET UP (it must be set in the server too:
-#                       Ollama num_ctx / OLLAMA_CONTEXT_LENGTH, vLLM --max-model-len, llama.cpp -c). Longer inputs are refused.
-#   structured_output   "json_schema" (server forces the answer to fit the form, best), "json_object" (valid JSON only)
-#                       or "none". If the server answers HTTP 400 about the format, use "json_object".
-#   temperature, seed   0 and 0: the same question gives the same answer. temperature None = do not send it.
 
 
 
-LLM_MODELS: dict[str, dict] = {
-    "local":      {"base_url": LOCAL_LLM_URL, "think": False, "model": "qwen3:8b", "temperature": 0.5, "seed": 0,
-                   "max_tokens": 2500, "context_tokens": 8192, "structured_output": "json_schema"},
-    "local_long": {"base_url": LOCAL_LLM_URL, "think": False, "model": "qwen3:8b", "temperature": 0.0, "seed": 0,
-                   "max_tokens": 3000, "context_tokens": 32768, "structured_output": "json_schema"},
-}
-REVIEW_MODEL_B2A = "local"         # nickname from LLM_MODELS: abstract reviews (short inputs)
-REVIEW_MODEL_B2B = "local_long"    # nickname from LLM_MODELS: seed full-text reviews (long inputs, needs a big context)
-B2A_PROMPT_VERSION = "2"           # bump when the B2a prompt changes (part of the cache key)
-MAX_ABSTRACT_CHARS = 3000          # longer abstracts are cut
-MIN_QUOTE_WORDS = 5                # a supporting quote shorter than this is not evidence
-MAX_QUOTE_CHARS = 300
-MAX_CONCEPTS = 8
-B2A_RETRY_FAIL_FRACTION = 0.5      # if MORE than this share of claims fail the quote check, ask once more
+
+
 
 # ------------------------------------------------------------------ safety check
 def validate() -> None:
@@ -380,6 +395,10 @@ def validate() -> None:
         raise ValueError("MAX_ABSTRACT_CHARS, MIN_QUOTE_WORDS, MAX_QUOTE_CHARS and MAX_CONCEPTS must be >= 1")
     if not 0.0 <= B2A_RETRY_FAIL_FRACTION <= 1.0:
         raise ValueError("B2A_RETRY_FAIL_FRACTION must be between 0 and 1")
+    if B4_MODEL not in LLM_MODELS:
+        raise ValueError(f"B4_MODEL {B4_MODEL!r} is not a key of LLM_MODELS")
+    if B4_MAX_PAIRS < 0:
+        raise ValueError("B4_MAX_PAIRS must be >= 0")
 
 
 validate()

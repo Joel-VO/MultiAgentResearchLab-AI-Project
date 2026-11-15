@@ -4,7 +4,7 @@ from __future__ import annotations
 from statistics import variance
 from typing import Callable, Iterable
 
-from .interface import Conflict
+from ..interface import Conflict
 
 
 def detect_reviewer_conflicts(
@@ -33,13 +33,12 @@ def detect_reviewer_conflicts(
         if score_var <= threshold:
             continue
         summary = summarize_fn(item, score_var) if summarize_fn else (
-            "Reviewers gave substantially different scores for this submission."
+            f"Reviewers gave substantially different scores for this submission (variance {score_var:.1f})."
         )
         comments = item.get("reviewer_comments", [])
         evidence = " | ".join(str(c) for c in comments if c) if isinstance(comments, list) else str(comments or "")
         output.append(Conflict(
             id=f"CF-R{len(output) + 1}", type="reviewer", paper_ids=[paper_id],
             summary=summary, evidence_text=evidence or f"Reviewer scores: {valid_scores}",
-            score_variance=score_var,
         ))
     return output

@@ -82,7 +82,10 @@ def build_graph(papers, embeddings, reviews=(), citation_edges=(), k=5) -> nx.Mu
             for raw_name in values:
                 if not isinstance(raw_name, str) or not raw_name.strip():
                     continue
-                node_id = concept_node_id(kind, raw_name)
+                try:
+                    node_id = concept_node_id(kind, raw_name)
+                except ValueError:          # e.g. a name made only of symbols: skip it, do not crash
+                    continue
                 graph.add_node(node_id, type=kind, name=normalize_name(raw_name))
                 graph.add_edge(pid, node_id, kind=f"has_{kind}")
     return graph
